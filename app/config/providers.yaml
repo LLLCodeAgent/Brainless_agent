@@ -1,0 +1,24 @@
+browser:
+  channel: chrome
+  headless: false
+  profile_dir: data/browser-profile
+  navigation_timeout_seconds: 45
+agent:
+  max_retries: 3
+  max_actions: 100
+  max_task_minutes: 30
+  emergency_stop_hotkey: CTRL+SHIFT+ESC
+providers:
+  chatgpt:
+    enabled: true
+    url: https://chatgpt.com/
+  gemini:
+    enabled: true
+    url: https://gemini.google.com/
+  claude:
+    enabled: true
+    url: https://claude.ai/
+prompts:
+  default_profile: research
+workflows:
+  multi_provider_synthesis: true

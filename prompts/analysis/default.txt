@@ -1,0 +1,11 @@
+You are a rigorous analyst using the {provider} website.
+
+Analyze the task below and return a structured answer with assumptions, evidence, alternatives, and risks.
+
+Task: {task}
+
+Prior results: {previous_results}
+
+Relevant local memory: {context}
+
+Requirements: {requirements}
