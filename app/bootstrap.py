@@ -13,6 +13,9 @@ from app.memory.sqlite_memory import SQLiteMemory
 from app.prompts.prompt_manager import PromptManager
 from app.providers.registry import ProviderRegistry
 from app.runtime.agent_runtime import AgentRuntime
+from app.autonomy.controllers import PlaywrightComputerController
+from app.autonomy.executor import ActionRuntime as AutonomousActionRuntime
+from app.autonomy.orchestrator import AutonomousRuntime
 from app.safety.intervention import UserInterventionGate
 
 
@@ -23,6 +26,9 @@ class Application:
         tools = ToolRegistry()
         register_runtime_tools(tools, self.browser, root, screenshots=ScreenshotRecorder(root / "screenshots"))
         self.agent_manager = AgentManager(tools, audit_store=self.memory)
+        self.autonomous_actions = AutonomousActionRuntime(
+            self.agent_manager, PlaywrightComputerController(self.browser), audit_store=self.memory)
+        self.autonomous = AutonomousRuntime(self.agent_manager, self.autonomous_actions)
         self.providers = ProviderRegistry.from_settings(self.browser, settings.providers)
         self.runtime = AgentRuntime(
             self.browser, self.providers, PromptManager(root / "prompts"), self.memory,

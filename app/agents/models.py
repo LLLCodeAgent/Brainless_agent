@@ -12,6 +12,7 @@ class AgentStatus(str, Enum):
     READY = "ready"
     RUNNING = "running"
     WAITING = "waiting"
+    BLOCKED = "blocked"
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"

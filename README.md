@@ -2,6 +2,26 @@
 
 Brainless Agent is a Python computer-use runtime. It orchestrates a real, persistent Chrome session and uses chatbot **websites** as interchangeable reasoning engines. It does not call OpenAI, Gemini, Anthropic, or any other model reasoning API, and it has no API-key configuration.
 
+## vNext autonomous computer-agent runtime
+
+Alongside the existing browser-provider workflow, vNext adds a runtime-owned autonomous execution path:
+
+```text
+USER -> Root -> capability analysis -> AgentRegistry -> reuse | AgentFactory
+     -> AgentSupervisor/ActionRuntime -> observe -> structured decision -> policy/permission
+     -> resource lock -> controller action -> observe and verify -> audited result
+```
+
+`app/autonomy` is model independent: a decision provider can propose only a typed `ComputerAction`; it cannot access Python, the OS, controller backends, permissions, or tool registration. `ActionRuntime` validates identity, allow-listed tool, permission, global policy, arguments, locks shared resources, executes through a replaceable `ComputerController`, observes again, and verifies expected state. Failures are machine-readable (`PERMISSION_DENIED`, `CAPABILITY_UNAVAILABLE`, `VERIFICATION_FAILED`, and related codes), bounded by step and failure budgets, and logged in runtime audit records.
+
+The production `PlaywrightComputerController` implements real browser observation/navigation and explicitly reports unsupported OS capabilities rather than faking success. OS/browser/filesystem/process adapters remain behind `ToolRegistry`; platform-specific controllers can be added without changing the agent hierarchy. The integration tests use an injected deterministic controller solely to make the full runtime flow reproducible; production actions are never hard-coded workflows.
+
+Agents are configurations, not fixed classes. `CapabilityAnalyzer` derives conservative minimum requirements, `AgentRegistry` reuses an idle compatible agent, and `AgentFactory` validates an `AgentSpec`, parent permission boundary, and registered tool metadata before creation. Parent-owned grants remain the only way to add permissions. `ResourceLockManager` serializes mouse/keyboard/browser/screen resources. Existing `AgentManager` continues to supply hierarchy, lifecycle, pause/resume/retry/termination, parallel independent execution, and persisted event auditing.
+
+### Autonomous runtime test coverage
+
+`tests/test_autonomous_runtime.py` proves dynamic BrowserAgent creation, least-privilege navigation, observation/action verification, registry reuse, denied mouse control, authorized parent grant, and task requirement analysis. Browser, OS, and provider integrations still require the local platform and an owner-authenticated profile.
+
 ## Phase 1: working vertical slice
 
 The current implementation is an end-to-end browser-driven MVP:

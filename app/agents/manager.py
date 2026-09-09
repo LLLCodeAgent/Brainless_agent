@@ -96,6 +96,18 @@ class AgentManager:
         child.permissions.discard(permission)
         self._event(child, EventType.STATUS, "Permission revoked", {"permission": permission})
 
+    def grant_tool(self, parent_agent_id: str, agent_id: str, tool_id: str) -> None:
+        """Authorize a registered tool for a direct child after its permissions exist."""
+        child = self._owned_child(parent_agent_id, agent_id)
+        tool = self.tools.get(tool_id)
+        missing = tool.required_permissions - child.permissions
+        if missing:
+            permission = sorted(missing)[0]
+            self._deny(child.agent_id, child.parent_agent_id, permission, "Child lacks required tool permission")
+            raise PermissionDenied(child.agent_id, permission, "Child lacks required tool permission")
+        child.available_tools.add(tool_id)
+        self._event(child, EventType.STATUS, "Tool granted", {"tool": tool_id})
+
     def report_progress(self, agent_id: str, detail: str) -> None:
         agent = self.get_agent(agent_id)
         self._event(agent, EventType.PROGRESS, detail)
