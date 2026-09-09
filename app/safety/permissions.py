@@ -10,7 +10,10 @@ class Permission(str, Enum):
     MOUSE_READ = "mouse.read"
     MOUSE_MOVE = "mouse.move"
     MOUSE_CLICK = "mouse.click"
+    MOUSE_DRAG = "mouse.drag"
     SCREEN_READ = "screen.read"
+    WINDOW_READ = "window.read"
+    WINDOW_CONTROL = "window.control"
     CLIPBOARD_READ = "clipboard.read"
     CLIPBOARD_WRITE = "clipboard.write"
     BROWSER_READ = "browser.read"
@@ -51,10 +54,18 @@ class PermissionPolicy:
     """Global policy layer; ownership checks remain in the agent manager."""
     def __init__(self, modes: dict[str, ApprovalMode] | None = None) -> None:
         self.modes = modes or {}
+        self._approved: set[tuple[str, str]] = set()
+
+    def approve_once(self, agent_id: str, permission: str) -> None:
+        """Runtime-only one-shot approval consumed by the next policy check."""
+        self._approved.add((agent_id, permission))
 
     def check(self, agent_id: str, permission: str) -> None:
         mode = self.modes.get(permission, ApprovalMode.AUTO_APPROVE)
         if mode is ApprovalMode.DENY:
             raise PermissionDenied(agent_id, permission, "Global policy denies this permission")
         if mode is ApprovalMode.REQUIRE_APPROVAL:
+            if (agent_id, permission) in self._approved:
+                self._approved.remove((agent_id, permission))
+                return
             raise ApprovalRequired(agent_id, permission, "Human approval is required")
