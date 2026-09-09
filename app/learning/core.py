@@ -1,0 +1,162 @@
+"""Durable, advisory experience and versioned skills.
+
+This layer has no ToolRegistry or controller dependency: it can only return data for
+planning. All execution remains subject to ActionRuntime permission/policy checks.
+"""
+from __future__ import annotations
+import json
+import re
+import sqlite3
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from app.autonomy.task_graph import GraphTask, TaskGraph
+
+
+class ExperienceSource(str, Enum):
+    RUNTIME = "runtime"
+    EXTERNAL = "external"
+    HUMAN = "human"
+
+class SkillStatus(str, Enum):
+    UNTRUSTED = "untrusted"
+    CANDIDATE = "candidate"
+    TESTED = "tested"
+    VERIFIED = "verified"
+    TRUSTED = "trusted"
+    REJECTED = "rejected"
+    DEPRECATED = "deprecated"
+
+@dataclass(frozen=True, slots=True)
+class Experience:
+    goal: str
+    task_type: str
+    environment: dict[str, str]
+    plan: dict[str, Any]
+    success: bool
+    verified: bool
+    final_result: str
+    capabilities_used: tuple[str, ...] = ()
+    tools_used: tuple[str, ...] = ()
+    actions: tuple[dict[str, Any], ...] = ()
+    failures: tuple[str, ...] = ()
+    recovery_steps: tuple[str, ...] = ()
+    execution_time_ms: float = 0.0
+    risk_level: str = "low"
+    source: ExperienceSource = ExperienceSource.RUNTIME
+    experience_id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+@dataclass(frozen=True, slots=True)
+class Skill:
+    name: str
+    description: str
+    required_capabilities: frozenset[str]
+    required_permissions: frozenset[str]
+    workflow: tuple[dict[str, Any], ...]
+    expected_outcomes: tuple[str, ...]
+    version: int = 1
+    status: SkillStatus = SkillStatus.CANDIDATE
+    preconditions: dict[str, Any] = field(default_factory=dict)
+    failure_modes: tuple[str, ...] = ()
+    recovery_strategy: str = "reobserve"
+    risk_level: str = "low"
+    source_experience_id: str | None = None
+    evaluation: dict[str, float] = field(default_factory=dict)
+    skill_id: str = field(default_factory=lambda: str(uuid4()))
+
+class ExperienceMemory:
+    """Structured execution memory; external content can never become trusted experience."""
+    def __init__(self, path: Path, max_records: int = 1_000) -> None:
+        self.max_records = max_records
+        self.db = sqlite3.connect(path)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("""CREATE TABLE IF NOT EXISTS experiences (id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+          source TEXT NOT NULL, goal TEXT NOT NULL, task_type TEXT NOT NULL, environment_json TEXT NOT NULL,
+          payload_json TEXT NOT NULL, success INTEGER NOT NULL, verified INTEGER NOT NULL)""")
+        self.db.commit()
+
+    def store(self, experience: Experience) -> None:
+        if experience.source is ExperienceSource.EXTERNAL:
+            raise ValueError("External content must be validated before entering experience memory")
+        payload = asdict(experience); payload["source"] = experience.source.value
+        self.db.execute("INSERT OR REPLACE INTO experiences VALUES (?,?,?,?,?,?,?,?,?)", (experience.experience_id,
+            experience.created_at, experience.source.value, experience.goal, experience.task_type,
+            json.dumps(experience.environment, sort_keys=True), json.dumps(payload, sort_keys=True), int(experience.success), int(experience.verified)))
+        self.db.execute("DELETE FROM experiences WHERE id IN (SELECT id FROM experiences ORDER BY created_at DESC LIMIT -1 OFFSET ?)", (self.max_records,))
+        self.db.commit()
+
+    def retrieve(self, goal: str, *, task_type: str | None = None, environment: dict[str, str] | None = None,
+                 limit: int = 5, max_age: timedelta | None = None) -> list[Experience]:
+        rows = self.db.execute("SELECT * FROM experiences ORDER BY created_at DESC").fetchall()
+        terms = set(_terms(goal)); now = datetime.now(timezone.utc)
+        scored: list[tuple[float, Experience]] = []
+        for row in rows:
+            experience = _experience(json.loads(row["payload_json"]))
+            if max_age and now - datetime.fromisoformat(experience.created_at) > max_age: continue
+            score = len(terms & set(_terms(experience.goal)))
+            score += 3 if task_type and task_type == experience.task_type else 0
+            score += sum(1 for key, value in (environment or {}).items() if experience.environment.get(key) == value)
+            if score: scored.append((score + (2 if experience.success and experience.verified else -2), experience))
+        return [item for _, item in sorted(scored, key=lambda pair: pair[0], reverse=True)[:limit]]
+
+    def close(self) -> None: self.db.close()
+
+class SkillRegistry:
+    def __init__(self, path: Path) -> None:
+        self.db = sqlite3.connect(path); self.db.row_factory = sqlite3.Row
+        self.db.execute("""CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY, name TEXT NOT NULL, version INTEGER NOT NULL,
+          status TEXT NOT NULL, payload_json TEXT NOT NULL, UNIQUE(name, version))"""); self.db.commit()
+
+    def register(self, skill: Skill) -> None:
+        if skill.status in {SkillStatus.TRUSTED, SkillStatus.VERIFIED}:
+            raise ValueError("Learned skills must enter as candidates and be evaluated first")
+        if not skill.workflow: raise ValueError("A skill needs an executable workflow")
+        self.db.execute("INSERT INTO skills VALUES (?,?,?,?,?)", (skill.skill_id, skill.name, skill.version, skill.status.value, json.dumps(_skill_dict(skill), sort_keys=True))); self.db.commit()
+
+    def versions(self, name: str) -> list[Skill]: return [_skill(json.loads(row["payload_json"])) for row in self.db.execute("SELECT * FROM skills WHERE name=? ORDER BY version", (name,))]
+    def search(self, goal: str, *, statuses: tuple[SkillStatus, ...] = (SkillStatus.VERIFIED, SkillStatus.TRUSTED)) -> list[Skill]:
+        wanted = set(_terms(goal)); return [skill for skill in self._all() if skill.status in statuses and wanted & set(_terms(skill.name + " " + skill.description))]
+    def get(self, skill_id: str) -> Skill: return _skill(json.loads(self.db.execute("SELECT payload_json FROM skills WHERE id=?", (skill_id,)).fetchone()[0]))
+    def set_status(self, skill_id: str, status: SkillStatus) -> None:
+        skill = self.get(skill_id)
+        data = _skill_dict(skill)
+        data["status"] = status.value
+        self.db.execute("UPDATE skills SET status=?,payload_json=? WHERE id=?", (status.value, json.dumps(data, sort_keys=True), skill_id))
+        self.db.commit()
+    def deprecate(self, skill_id: str) -> None: self.set_status(skill_id, SkillStatus.DEPRECATED)
+    def candidates(self) -> tuple[Skill, ...]: return tuple(skill for skill in self._all() if skill.status is SkillStatus.CANDIDATE)
+    def _all(self) -> list[Skill]: return [_skill(json.loads(row["payload_json"])) for row in self.db.execute("SELECT payload_json FROM skills")]
+    def close(self) -> None: self.db.close()
+
+class SkillEvaluator:
+    def evaluate(self, skill: Skill, experiences: list[Experience], *, baseline: Skill | None = None) -> SkillStatus:
+        success_rate = sum(item.success and item.verified for item in experiences) / len(experiences) if experiences else 0.0
+        if baseline and skill.evaluation.get("success_rate", 0.0) < baseline.evaluation.get("success_rate", 0.0): return SkillStatus.REJECTED
+        return SkillStatus.VERIFIED if success_rate >= .8 and len(experiences) >= 1 else SkillStatus.TESTED
+
+class WorkflowSynthesizer:
+    """Composes discovered skills into a graph; returned graph is still advisory and must be validated."""
+    def synthesize(self, goal: str, skills: list[Skill], experiences: list[Experience] = ()) -> TaskGraph:
+        graph = TaskGraph(); previous: str | None = None
+        for skill in skills:
+            for index, step in enumerate(skill.workflow):
+                node_id = f"{skill.skill_id}:{index}"
+                graph.add(GraphTask(node_id, str(step.get("objective", skill.description)),
+                    dependencies={previous} if previous else set(), capabilities=skill.required_capabilities,
+                    permissions=skill.required_permissions, resources=frozenset(step.get("resources", ())), tool=step.get("tool"),
+                    high_risk=skill.risk_level in {"high", "critical"}, requires_approval=skill.risk_level in {"high", "critical"}))
+                previous = node_id
+        graph.validate(); return graph
+
+def _terms(text: str) -> list[str]: return re.findall(r"[a-z0-9_]+", text.casefold())
+def _experience(data: dict[str, Any]) -> Experience:
+    data["source"] = ExperienceSource(data["source"]); data["capabilities_used"] = tuple(data.get("capabilities_used", ())); data["tools_used"] = tuple(data.get("tools_used", ())); data["actions"] = tuple(data.get("actions", ())); data["failures"] = tuple(data.get("failures", ())); data["recovery_steps"] = tuple(data.get("recovery_steps", ())); return Experience(**data)
+def _skill_dict(skill: Skill) -> dict[str, Any]:
+    data = asdict(skill); data["required_capabilities"] = sorted(skill.required_capabilities); data["required_permissions"] = sorted(skill.required_permissions); data["status"] = skill.status.value; return data
+def _skill(data: dict[str, Any]) -> Skill:
+    data["required_capabilities"] = frozenset(data["required_capabilities"]); data["required_permissions"] = frozenset(data["required_permissions"]); data["workflow"] = tuple(data["workflow"]); data["expected_outcomes"] = tuple(data["expected_outcomes"]); data["failure_modes"] = tuple(data.get("failure_modes", ())); data["status"] = SkillStatus(data["status"]); return Skill(**data)
