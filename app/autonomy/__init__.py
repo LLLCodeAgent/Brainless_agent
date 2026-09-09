@@ -14,3 +14,5 @@ from app.autonomy.config import AutonomyLimits
 from app.autonomy.observation import ScreenElement, ScreenObservation, ScreenUnderstandingProvider
 
 __all__ = ["AutonomousRuntime", "AutonomousTaskEngine", "FactKind", "WorldFact", "WorldSnapshot", "WorldStateManager", "ActionContract", "Idempotency", "RetryPolicy", "GraphTask", "GraphTaskStatus", "TaskGraph", "TaskScheduler", "GoalCompletionVerifier", "ContentTrust", "PlanValidator", "TaskContext", "TaskContextManager", "AutonomyLimits", "ScreenElement", "ScreenObservation", "ScreenUnderstandingProvider"]
+
+from app.autonomy.team import AgentTeamBuilder, TeamAssignment

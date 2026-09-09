@@ -223,3 +223,64 @@ def test_closed_loop_recovery_replans_after_a_real_filesystem_failure(tmp_path) 
         assert (tmp_path / "recovered.txt").read_text() == "safe"
         assert "INVALID_ARGUMENT" in actions.audit[0].error
     asyncio.run(scenario())
+
+
+def test_task_engine_learns_then_reuses_a_verified_workflow_through_runtime_gates(tmp_path) -> None:
+    """The second execution uses a persisted skill, not a task-name branch."""
+    from app.autonomy.contracts import ActionContract
+    from app.autonomy.task_graph import GraphTask, TaskGraph
+    from app.learning import ExperienceMemory, LearningCoordinator, SkillRegistry, SkillStatus
+
+    class FileCriterion:
+        async def verify(self, _):
+            report = tmp_path / "report.txt"
+            return (report.is_file() and report.read_text() == "verified", "report missing")
+
+    class WriteDecision:
+        def __init__(self): self.done = False
+        async def next_action(self, _):
+            if self.done: return None
+            self.done = True
+            return ActionProposal("filesystem.write", {"path": "report.txt", "content": "verified"}, "write report")
+
+    def graph() -> TaskGraph:
+        result = TaskGraph()
+        result.add(GraphTask("write", "write report file", capabilities=frozenset({"filesystem.write"}),
+            permissions=frozenset({Permission.FILESYSTEM_WRITE.value}), tool="filesystem.write",
+            resources=frozenset({"filesystem/report.txt"})))
+        return result
+
+    async def scenario() -> None:
+        manager = AgentManager()
+        root = manager.create_root("Root", "orchestrator", "Learn reports", {
+            Permission.SCREEN_READ.value, Permission.FILESYSTEM_WRITE.value,
+        })
+        actions = ActionRuntime(manager, FilesystemComputerController(tmp_path), contracts={
+            "filesystem.write": ActionContract("write-report", "filesystem.write", frozenset({Permission.FILESYSTEM_WRITE.value})),
+        })
+        memories = ExperienceMemory(tmp_path / "experiences.db")
+        skills = SkillRegistry(tmp_path / "skills.db")
+        engine = AutonomousTaskEngine(AutonomousRuntime(manager, actions), actions,
+            learning=LearningCoordinator(memories, skills))
+        first = await engine.run_with_learning(root.agent_id,
+            AutonomousTask("Create report file", (FileCriterion(),), "first"), task_type="report",
+            environment={"app": "filesystem"}, decider_for=lambda _: WriteDecision(), fallback_graph=graph(),
+            candidate_name="create report file", candidate_description="write a verified report file")
+        assert first.verified
+        candidate = skills.candidates()[0]
+        skills.set_status(candidate.skill_id, SkillStatus.VERIFIED)
+        (tmp_path / "report.txt").unlink()
+        reused_nodes: list[str] = []
+        def reused_decider(node):
+            reused_nodes.append(node.task_id)
+            return WriteDecision()
+        second = await engine.run_with_learning(root.agent_id,
+            AutonomousTask("Create another report file", (FileCriterion(),), "second"), task_type="report",
+            environment={"app": "filesystem"}, decider_for=reused_decider, fallback_graph=graph())
+        assert second.verified
+        assert memories.retrieve("another report", task_type="report")[0].success
+        # The synthesized node id proves this was the persisted skill workflow, not fallback_graph.
+        assert reused_nodes and reused_nodes[0].startswith(candidate.skill_id + ":")
+        memories.close(); skills.close()
+
+    asyncio.run(scenario())

@@ -40,6 +40,11 @@ class Experience:
     success: bool
     verified: bool
     final_result: str
+    initial_state: dict[str, Any] = field(default_factory=dict)
+    agents_used: tuple[str, ...] = ()
+    observations: tuple[dict[str, Any], ...] = ()
+    verification_results: tuple[str, ...] = ()
+    resource_usage: dict[str, float] = field(default_factory=dict)
     capabilities_used: tuple[str, ...] = ()
     tools_used: tuple[str, ...] = ()
     actions: tuple[dict[str, Any], ...] = ()
@@ -64,7 +69,9 @@ class Skill:
     preconditions: dict[str, Any] = field(default_factory=dict)
     failure_modes: tuple[str, ...] = ()
     recovery_strategy: str = "reobserve"
+    verification_strategy: str = "runtime_goal_verifier"
     risk_level: str = "low"
+    success_metrics: dict[str, float] = field(default_factory=dict)
     source_experience_id: str | None = None
     evaluation: dict[str, float] = field(default_factory=dict)
     skill_id: str = field(default_factory=lambda: str(uuid4()))
@@ -78,6 +85,8 @@ class ExperienceMemory:
         self.db.execute("""CREATE TABLE IF NOT EXISTS experiences (id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
           source TEXT NOT NULL, goal TEXT NOT NULL, task_type TEXT NOT NULL, environment_json TEXT NOT NULL,
           payload_json TEXT NOT NULL, success INTEGER NOT NULL, verified INTEGER NOT NULL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS experience_feedback (feedback_id INTEGER PRIMARY KEY, experience_id TEXT NOT NULL,
+          kind TEXT NOT NULL, actor TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL)""")
         self.db.commit()
 
     def store(self, experience: Experience) -> None:
@@ -96,13 +105,38 @@ class ExperienceMemory:
         terms = set(_terms(goal)); now = datetime.now(timezone.utc)
         scored: list[tuple[float, Experience]] = []
         for row in rows:
-            experience = _experience(json.loads(row["payload_json"]))
-            if max_age and now - datetime.fromisoformat(experience.created_at) > max_age: continue
+            # A damaged row must never prevent safe retrieval of other records.
+            try:
+                experience = _experience(json.loads(row["payload_json"]))
+                created = datetime.fromisoformat(experience.created_at)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if max_age and now - created > max_age: continue
             score = len(terms & set(_terms(experience.goal)))
             score += 3 if task_type and task_type == experience.task_type else 0
             score += sum(1 for key, value in (environment or {}).items() if experience.environment.get(key) == value)
-            if score: scored.append((score + (2 if experience.success and experience.verified else -2), experience))
+            if score: scored.append((score + (2 if experience.success and experience.verified else -2) + self.feedback_score(experience.experience_id), experience))
         return [item for _, item in sorted(scored, key=lambda pair: pair[0], reverse=True)[:limit]]
+
+    def add_feedback(self, experience_id: str, kind: str, *, actor: str, detail: str = "") -> None:
+        if kind not in {"approve", "reject", "correct", "prefer_strategy", "mark_result_wrong"}:
+            raise ValueError("Unknown feedback kind")
+        if self.db.execute("SELECT 1 FROM experiences WHERE id=?", (experience_id,)).fetchone() is None:
+            raise KeyError(f"Unknown experience: {experience_id}")
+        self.db.execute("INSERT INTO experience_feedback(experience_id,kind,actor,detail,created_at) VALUES (?,?,?,?,?)",
+                        (experience_id, kind, actor, detail, datetime.now(timezone.utc).isoformat()))
+        self.db.commit()
+
+    def feedback_score(self, experience_id: str) -> int:
+        rows = self.db.execute("SELECT kind FROM experience_feedback WHERE experience_id=?", (experience_id,))
+        return sum({"approve": 1, "prefer_strategy": 1, "reject": -2, "mark_result_wrong": -2, "correct": -1}[row[0]] for row in rows)
+
+    def purge_expired(self, max_age: timedelta) -> int:
+        """Remove non-critical stale records and return the number removed."""
+        cutoff = (datetime.now(timezone.utc) - max_age).isoformat()
+        cursor = self.db.execute("DELETE FROM experiences WHERE created_at < ? AND success=0", (cutoff,))
+        self.db.commit()
+        return cursor.rowcount
 
     def close(self) -> None: self.db.close()
 
@@ -110,34 +144,60 @@ class SkillRegistry:
     def __init__(self, path: Path) -> None:
         self.db = sqlite3.connect(path); self.db.row_factory = sqlite3.Row
         self.db.execute("""CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY, name TEXT NOT NULL, version INTEGER NOT NULL,
-          status TEXT NOT NULL, payload_json TEXT NOT NULL, UNIQUE(name, version))"""); self.db.commit()
+          status TEXT NOT NULL, payload_json TEXT NOT NULL, UNIQUE(name, version))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS skill_audit (event_id INTEGER PRIMARY KEY, skill_id TEXT NOT NULL,
+          event TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL)""")
+        self.db.commit()
+
+    def _audit(self, skill_id: str, event: str, actor: str, reason: str) -> None:
+        self.db.execute("INSERT INTO skill_audit(skill_id,event,actor,reason,created_at) VALUES (?,?,?,?,?)",
+                        (skill_id, event, actor, reason, datetime.now(timezone.utc).isoformat()))
+
+    def audit_trail(self, skill_id: str) -> tuple[dict[str, str], ...]:
+        return tuple(dict(row) for row in self.db.execute("SELECT event,actor,reason,created_at FROM skill_audit WHERE skill_id=? ORDER BY event_id", (skill_id,)))
 
     def register(self, skill: Skill) -> None:
         if skill.status in {SkillStatus.TRUSTED, SkillStatus.VERIFIED}:
             raise ValueError("Learned skills must enter as candidates and be evaluated first")
         if not skill.workflow: raise ValueError("A skill needs an executable workflow")
-        self.db.execute("INSERT INTO skills VALUES (?,?,?,?,?)", (skill.skill_id, skill.name, skill.version, skill.status.value, json.dumps(_skill_dict(skill), sort_keys=True))); self.db.commit()
+        self.db.execute("INSERT INTO skills VALUES (?,?,?,?,?)", (skill.skill_id, skill.name, skill.version, skill.status.value, json.dumps(_skill_dict(skill), sort_keys=True)))
+        self._audit(skill.skill_id, "created", "system", "registered candidate")
+        self.db.commit()
 
     def versions(self, name: str) -> list[Skill]: return [_skill(json.loads(row["payload_json"])) for row in self.db.execute("SELECT * FROM skills WHERE name=? ORDER BY version", (name,))]
     def search(self, goal: str, *, statuses: tuple[SkillStatus, ...] = (SkillStatus.VERIFIED, SkillStatus.TRUSTED)) -> list[Skill]:
         wanted = set(_terms(goal)); return [skill for skill in self._all() if skill.status in statuses and wanted & set(_terms(skill.name + " " + skill.description))]
     def get(self, skill_id: str) -> Skill: return _skill(json.loads(self.db.execute("SELECT payload_json FROM skills WHERE id=?", (skill_id,)).fetchone()[0]))
-    def set_status(self, skill_id: str, status: SkillStatus) -> None:
+    def set_status(self, skill_id: str, status: SkillStatus, *, actor: str = "system", reason: str = "lifecycle transition") -> None:
         skill = self.get(skill_id)
+        allowed = {
+            SkillStatus.UNTRUSTED: {SkillStatus.CANDIDATE, SkillStatus.REJECTED},
+            SkillStatus.CANDIDATE: {SkillStatus.TESTED, SkillStatus.VERIFIED, SkillStatus.REJECTED, SkillStatus.DEPRECATED},
+            SkillStatus.TESTED: {SkillStatus.VERIFIED, SkillStatus.REJECTED, SkillStatus.DEPRECATED},
+            SkillStatus.VERIFIED: {SkillStatus.TRUSTED, SkillStatus.DEPRECATED},
+            SkillStatus.TRUSTED: {SkillStatus.DEPRECATED},
+            SkillStatus.REJECTED: set(),
+            SkillStatus.DEPRECATED: set(),
+        }
+        if status is not skill.status and status not in allowed[skill.status]:
+            raise ValueError(f"Invalid skill lifecycle transition: {skill.status.value} -> {status.value}")
         data = _skill_dict(skill)
         data["status"] = status.value
         self.db.execute("UPDATE skills SET status=?,payload_json=? WHERE id=?", (status.value, json.dumps(data, sort_keys=True), skill_id))
+        self._audit(skill_id, status.value, actor, reason)
         self.db.commit()
-    def deprecate(self, skill_id: str) -> None: self.set_status(skill_id, SkillStatus.DEPRECATED)
+    def approve(self, skill_id: str, *, actor: str, reason: str) -> None:
+        """Human approval is explicit and never grants runtime permissions."""
+        skill = self.get(skill_id)
+        if skill.status is not SkillStatus.TESTED:
+            raise ValueError("Only sandbox-tested skills may be approved")
+        self.set_status(skill_id, SkillStatus.VERIFIED, actor=actor, reason=reason)
+    def reject(self, skill_id: str, *, actor: str, reason: str) -> None:
+        self.set_status(skill_id, SkillStatus.REJECTED, actor=actor, reason=reason)
+    def deprecate(self, skill_id: str, *, actor: str = "system", reason: str = "deprecated") -> None: self.set_status(skill_id, SkillStatus.DEPRECATED, actor=actor, reason=reason)
     def candidates(self) -> tuple[Skill, ...]: return tuple(skill for skill in self._all() if skill.status is SkillStatus.CANDIDATE)
     def _all(self) -> list[Skill]: return [_skill(json.loads(row["payload_json"])) for row in self.db.execute("SELECT payload_json FROM skills")]
     def close(self) -> None: self.db.close()
-
-class SkillEvaluator:
-    def evaluate(self, skill: Skill, experiences: list[Experience], *, baseline: Skill | None = None) -> SkillStatus:
-        success_rate = sum(item.success and item.verified for item in experiences) / len(experiences) if experiences else 0.0
-        if baseline and skill.evaluation.get("success_rate", 0.0) < baseline.evaluation.get("success_rate", 0.0): return SkillStatus.REJECTED
-        return SkillStatus.VERIFIED if success_rate >= .8 and len(experiences) >= 1 else SkillStatus.TESTED
 
 class WorkflowSynthesizer:
     """Composes discovered skills into a graph; returned graph is still advisory and must be validated."""
@@ -155,8 +215,8 @@ class WorkflowSynthesizer:
 
 def _terms(text: str) -> list[str]: return re.findall(r"[a-z0-9_]+", text.casefold())
 def _experience(data: dict[str, Any]) -> Experience:
-    data["source"] = ExperienceSource(data["source"]); data["capabilities_used"] = tuple(data.get("capabilities_used", ())); data["tools_used"] = tuple(data.get("tools_used", ())); data["actions"] = tuple(data.get("actions", ())); data["failures"] = tuple(data.get("failures", ())); data["recovery_steps"] = tuple(data.get("recovery_steps", ())); return Experience(**data)
+    data["source"] = ExperienceSource(data["source"]); data["agents_used"] = tuple(data.get("agents_used", ())); data["observations"] = tuple(data.get("observations", ())); data["verification_results"] = tuple(data.get("verification_results", ())); data["capabilities_used"] = tuple(data.get("capabilities_used", ())); data["tools_used"] = tuple(data.get("tools_used", ())); data["actions"] = tuple(data.get("actions", ())); data["failures"] = tuple(data.get("failures", ())); data["recovery_steps"] = tuple(data.get("recovery_steps", ())); return Experience(**data)
 def _skill_dict(skill: Skill) -> dict[str, Any]:
     data = asdict(skill); data["required_capabilities"] = sorted(skill.required_capabilities); data["required_permissions"] = sorted(skill.required_permissions); data["status"] = skill.status.value; return data
 def _skill(data: dict[str, Any]) -> Skill:
-    data["required_capabilities"] = frozenset(data["required_capabilities"]); data["required_permissions"] = frozenset(data["required_permissions"]); data["workflow"] = tuple(data["workflow"]); data["expected_outcomes"] = tuple(data["expected_outcomes"]); data["failure_modes"] = tuple(data.get("failure_modes", ())); data["status"] = SkillStatus(data["status"]); return Skill(**data)
+    data["required_capabilities"] = frozenset(data["required_capabilities"]); data["required_permissions"] = frozenset(data["required_permissions"]); data["workflow"] = tuple(data["workflow"]); data["expected_outcomes"] = tuple(data["expected_outcomes"]); data["failure_modes"] = tuple(data.get("failure_modes", ())); data["success_metrics"] = dict(data.get("success_metrics", {})); data["status"] = SkillStatus(data["status"]); return Skill(**data)
