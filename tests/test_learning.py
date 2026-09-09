@@ -90,3 +90,107 @@ def test_skill_sandbox_rejects_permission_escalation(tmp_path):
     with pytest.raises(ValueError, match="unavailable permissions"):
         SkillSandbox().validate(candidate, capabilities=frozenset({"filesystem.write"}), permissions=frozenset(),
                                 known_tools=frozenset({"filesystem.write"}), contracted_tools=frozenset({"filesystem.write"}))
+
+
+def test_corrupt_and_expired_experiences_do_not_break_advisory_retrieval(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    memory = ExperienceMemory(tmp_path / "experience.db")
+    old = Experience("failed report", "report", {}, {}, False, False, "", created_at=(datetime.now(timezone.utc) - timedelta(days=10)).isoformat())
+    current = Experience("current report", "report", {}, {}, True, True, "done")
+    memory.store(old); memory.store(current)
+    memory.db.execute("INSERT INTO experiences VALUES (?,?,?,?,?,?,?,?,?)", ("bad", "now", "runtime", "report", "report", "{}", "not json", 0, 0)); memory.db.commit()
+    assert memory.retrieve("report") == [current, old]
+    assert memory.purge_expired(timedelta(days=1)) == 1
+    assert memory.retrieve("report") == [current]
+    memory.close()
+
+
+def test_runtime_policy_never_grants_skill_permissions_or_ignores_preconditions(tmp_path):
+    from app.learning import LearningCoordinator, PolicyEngine
+    registry = SkillRegistry(tmp_path / "skills.db"); memory = ExperienceMemory(tmp_path / "memory.db")
+    skill = make_skill(); registry.register(skill); registry.set_status(skill.skill_id, SkillStatus.VERIFIED)
+    coordinator = LearningCoordinator(memory, registry, policy=PolicyEngine())
+    denied = coordinator.advise("write verified report", "report", {"app": "browser"},
+        agent_permissions=frozenset(), available_capabilities=frozenset({"filesystem.write"}))
+    assert not denied.skills and not denied.graph.tasks
+    allowed = coordinator.advise("write verified report", "report", {},
+        agent_permissions=frozenset({"filesystem.write"}), available_capabilities=frozenset({"filesystem.write"}))
+    assert allowed.skills and allowed.graph.tasks
+    memory.close(); registry.close()
+
+
+def test_skill_sandbox_evaluation_requires_test_before_human_approval_and_audits(tmp_path):
+    from app.learning import SkillSandbox
+    registry = SkillRegistry(tmp_path / "skills.db")
+    candidate = make_skill(); registry.register(candidate)
+    outcome, metrics = SkillSandbox().test(candidate, [Experience("write report", "report", {}, {}, True, True, "done")],
+        capabilities=frozenset({"filesystem.write"}), permissions=frozenset({"filesystem.write"}),
+        known_tools=frozenset({"filesystem.write"}), contracted_tools=frozenset({"filesystem.write"}))
+    assert outcome is SkillStatus.TESTED and metrics["verification_rate"] == 1.0
+    registry.set_status(candidate.skill_id, outcome, actor="sandbox", reason="controlled verification")
+    registry.approve(candidate.skill_id, actor="operator", reason="reviewed sandbox evidence")
+    assert registry.get(candidate.skill_id).status is SkillStatus.VERIFIED
+    assert [event["event"] for event in registry.audit_trail(candidate.skill_id)] == ["created", "tested", "verified"]
+    registry.close()
+
+
+def test_evidence_store_is_durable(tmp_path):
+    from app.learning import Evidence, EvidenceKind, EvidenceStore
+    path = tmp_path / "evidence.db"; store = EvidenceStore(path)
+    item = store.add(Evidence("report exists", EvidenceKind.FILE, "report.txt")); store.close()
+    reopened = EvidenceStore(path)
+    assert reopened.get(item.evidence_id).reference == "report.txt"
+    reopened.close()
+
+
+def test_human_feedback_is_durable_and_cannot_target_unknown_experience(tmp_path):
+    memory = ExperienceMemory(tmp_path / "experience.db")
+    experience = Experience("report", "report", {}, {}, True, True, "done"); memory.store(experience)
+    memory.add_feedback(experience.experience_id, "mark_result_wrong", actor="reviewer", detail="incorrect content")
+    assert memory.db.execute("SELECT kind FROM experience_feedback").fetchone()[0] == "mark_result_wrong"
+    with pytest.raises(KeyError): memory.add_feedback("missing", "approve", actor="reviewer")
+    memory.close()
+
+
+def test_feedback_changes_experience_ranking_and_explanation_is_structured(tmp_path):
+    from app.learning import EvidenceStore, explain
+    memory = ExperienceMemory(tmp_path / "experience.db")
+    rejected = Experience("report", "report", {}, {}, True, True, "done")
+    approved = Experience("report", "report", {}, {}, True, True, "done")
+    memory.store(rejected); memory.store(approved)
+    memory.add_feedback(rejected.experience_id, "mark_result_wrong", actor="reviewer")
+    assert memory.retrieve("report")[0].experience_id == approved.experience_id
+    summary = explain(approved, EvidenceStore())
+    assert summary.goal == "report" and not summary.uncertainty
+    memory.close()
+
+
+def test_agent_performance_is_durable_and_contextual(tmp_path):
+    from app.learning import AgentPerformanceMemory
+    memory = AgentPerformanceMemory(tmp_path / "agents.db")
+    memory.record("slow", "report", "filesystem", success=True, verified=True, duration_ms=20)
+    memory.record("fast", "report", "filesystem", success=True, verified=True, duration_ms=2)
+    memory.record("bad", "report", "filesystem", success=False, verified=False, duration_ms=1)
+    assert memory.best("report", "filesystem")[0].agent_id == "fast"
+    memory.close()
+
+
+def test_disposable_filesystem_sandbox_is_isolated_and_removed():
+    from app.learning import create_filesystem_sandbox
+    with create_filesystem_sandbox() as sandbox:
+        root = sandbox.root
+        (root / "candidate.txt").write_text("isolated")
+        assert (root / "candidate.txt").is_file()
+    assert not root.exists()
+
+
+def test_skill_sandbox_restricted_runner_accepts_only_runtime_experience(tmp_path):
+    import asyncio
+    from app.learning import SkillSandbox
+    candidate = make_skill()
+    async def runner(_):
+        return Experience("write report", "report", {}, {}, True, True, "done")
+    result = asyncio.run(SkillSandbox().execute_restricted(candidate, runner,
+        capabilities=frozenset({"filesystem.write"}), permissions=frozenset({"filesystem.write"}),
+        known_tools=frozenset({"filesystem.write"}), contracted_tools=frozenset({"filesystem.write"})))
+    assert result.success

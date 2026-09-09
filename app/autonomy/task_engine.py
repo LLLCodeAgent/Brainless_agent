@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -10,7 +11,13 @@ from uuid import uuid4
 from app.autonomy.checkpoints import CheckpointStore, ExecutionCheckpoint
 from app.autonomy.executor import ActionRuntime, DecisionProvider
 from app.autonomy.orchestrator import AutonomousRuntime
+from app.autonomy.models import TaskRequirements
 from app.autonomy.task_graph import GraphTask, GraphTaskStatus, TaskGraph, TaskScheduler
+from app.autonomy.planning import PlanValidator
+from app.learning.core import Experience
+from app.learning.engine import LearningCoordinator
+from app.learning.performance import AgentPerformanceMemory
+from app.autonomy.team import AgentTeamBuilder
 
 
 class TaskOutcome(str, Enum):
@@ -57,9 +64,11 @@ class AutonomousTaskEngine:
     """Coordinates agents, graph scheduling, final verification, and append-only journaling."""
     def __init__(self, runtime: AutonomousRuntime, actions: ActionRuntime, journal=None,
                  scheduler: TaskScheduler | None = None, verifier: GoalCompletionVerifier | None = None,
-                 checkpoints: CheckpointStore | None = None) -> None:
+                 checkpoints: CheckpointStore | None = None, learning: LearningCoordinator | None = None,
+                 performance: AgentPerformanceMemory | None = None, team_builder: AgentTeamBuilder | None = None) -> None:
         self.runtime, self.actions, self.journal, self.checkpoints = runtime, actions, journal, checkpoints
-        self.scheduler, self.verifier = scheduler or TaskScheduler(), verifier or GoalCompletionVerifier()
+        self.scheduler, self.verifier, self.learning = scheduler or TaskScheduler(), verifier or GoalCompletionVerifier(), learning
+        self.performance, self.team_builder = performance, team_builder or AgentTeamBuilder()
 
     async def run(self, root_agent_id: str, task: AutonomousTask, decider: DecisionProvider) -> TaskResult:
         """Backward-compatible single-node goal execution and journal vocabulary."""
@@ -82,28 +91,39 @@ class AutonomousTaskEngine:
                         decider_for: Callable[[GraphTask], DecisionProvider], *, dry_run: bool = False) -> TaskResult:
         graph.validate()
         self._journal(task.task_id, "GOAL_CREATED", {"objective": task.objective})
-        self._journal(task.task_id, "PLAN_CREATED", {"tasks": sorted(graph.tasks)})
+        assignments = self.team_builder.build(graph, self.runtime.registry)
+        self._journal(task.task_id, "PLAN_CREATED", {"tasks": sorted(graph.tasks), "team": [assignment.__dict__ if hasattr(assignment, "__dict__") else {"task_id": assignment.task_id, "agent_id": assignment.agent_id, "spawn": assignment.spawn} for assignment in assignments]})
         self._checkpoint(task, graph)
         if dry_run:
             return TaskResult(task.task_id, TaskOutcome.BLOCKED, "Dry run: no actions executed", False,
                               tuple(), tuple(), "dry_run")
         completed: list[str] = []
-        while ready := self.scheduler.next_tasks(graph, set(self.actions.locks.owners), limit=1):
-            node = ready[0]
-            node.status = GraphTaskStatus.RUNNING
-            self._journal(task.task_id, "TASK_CREATED", {"node": node.task_id, "objective": node.objective})
-            try:
-                execution = await self.runtime.execute(root_agent_id, f"{task.task_id}:{node.task_id}", node.objective,
-                                                       decider_for(node))
-            except Exception as error:
-                graph.fail(node.task_id, str(error))
-                self._checkpoint(task, graph)
-                self._journal(task.task_id, "TASK_FAILED", {"node": node.task_id, "error": str(error)})
-                continue
-            graph.complete(node.task_id)
-            completed.append(node.task_id)
+        # Only independent nodes with disjoint declared resources are scheduled together.
+        parallel_limit = max(1, self.actions.limits.max_parallel_agents)
+        while ready := self.scheduler.next_tasks(graph, set(self.actions.locks.owners), limit=parallel_limit):
+            for node in ready:
+                node.status = GraphTaskStatus.RUNNING
+                self._journal(task.task_id, "TASK_CREATED", {"node": node.task_id, "objective": node.objective})
+
+            async def execute_node(node: GraphTask):
+                requirements = (TaskRequirements(node.capabilities, node.permissions,
+                    frozenset({node.tool}) if node.tool else frozenset(), "WorkflowAgent")
+                    if node.capabilities or node.permissions or node.tool else None)
+                try:
+                    return node, await self.runtime.execute(root_agent_id, f"{task.task_id}:{node.task_id}",
+                        node.objective, decider_for(node), requirements), None
+                except Exception as error:
+                    return node, None, error
+
+            outcomes = await asyncio.gather(*(execute_node(node) for node in ready))
+            for node, execution, error in outcomes:
+                if error:
+                    graph.fail(node.task_id, str(error))
+                    self._journal(task.task_id, "TASK_FAILED", {"node": node.task_id, "error": str(error)})
+                    continue
+                graph.complete(node.task_id); completed.append(node.task_id)
+                self._journal(task.task_id, "TASK_COMPLETED", {"node": node.task_id, "agent_id": execution.agent_id})
             self._checkpoint(task, graph)
-            self._journal(task.task_id, "TASK_COMPLETED", {"node": node.task_id, "agent_id": execution.agent_id})
         succeeded, unmet = await self.verifier.verify(task.acceptance_criteria, self.actions)
         if succeeded and all(node.status is GraphTaskStatus.COMPLETED for node in graph.tasks.values()):
             self._journal(task.task_id, "GOAL_COMPLETED", {"completed": completed})
@@ -115,6 +135,53 @@ class AutonomousTaskEngine:
         reason = (blocked[0].error if blocked else failed[0].error if failed else "Acceptance criteria were not met")
         self._journal(task.task_id, "GOAL_VERIFICATION_FAILED", {"unmet": list(unmet), "reason": reason})
         return TaskResult(task.task_id, outcome, "Goal was not fully verified", False, unmet, tuple(completed), reason)
+
+    async def run_with_learning(self, root_agent_id: str, task: AutonomousTask, *, task_type: str,
+                                environment: dict[str, str], decider_for: Callable[[GraphTask], DecisionProvider],
+                                fallback_graph: TaskGraph, candidate_name: str | None = None,
+                                candidate_description: str | None = None) -> TaskResult:
+        """Run a policy-filtered reusable workflow, or the caller's validated fallback.
+
+        Learned graphs are never executed directly from storage: this method applies
+        the same graph, tool-contract, permission, scheduler, checkpoint, and final
+        verification path used by all autonomous work.
+        """
+        if self.learning is None:
+            return await self.run_graph(root_agent_id, task, fallback_graph, decider_for)
+        requirements = self.runtime.analyzer.analyze(task.objective)
+        advice = self.learning.advise(task.objective, task_type, environment,
+            agent_permissions=requirements.permissions,
+            available_capabilities=requirements.capabilities)
+        chosen = advice.graph if advice.graph.tasks else fallback_graph
+        PlanValidator().validate(chosen, available_capabilities=requirements.capabilities,
+            available_permissions=requirements.permissions,
+            known_tools=frozenset(self.actions.manager.tools.tool_ids),
+            contracted_tools=frozenset(self.actions.contracts))
+        result = await self.run_graph(root_agent_id, task, chosen, decider_for)
+        experience = Experience(task.objective, task_type, environment,
+            {"workflow": [{"objective": node.objective, "tool": node.tool,
+                            "resources": sorted(node.resources)} for node in chosen.tasks.values()],
+             "declared_permissions": sorted({permission for node in chosen.tasks.values() for permission in node.permissions}),
+             "expected_outcomes": ["goal acceptance criteria verified"]},
+            result.outcome is TaskOutcome.COMPLETED, result.verified, result.result,
+            initial_state=self.actions.world_state.snapshot().values(),
+            agents_used=tuple(sorted({record.agent_id for record in self.actions.audit if record.task_id.startswith(task.task_id)})),
+            observations=tuple({"source": fact.source, "key": key, "value": str(fact.value)}
+                               for key, fact in self.actions.world_state.snapshot().facts.items()),
+            verification_results=("goal acceptance criteria passed" if result.verified else "goal acceptance criteria failed",),
+            resource_usage={"actions": float(len([record for record in self.actions.audit if record.task_id.startswith(task.task_id)]))},
+            capabilities_used=tuple(sorted({capability for node in chosen.tasks.values() for capability in node.capabilities})),
+            tools_used=tuple(sorted({node.tool for node in chosen.tasks.values() if node.tool})),
+            failures=(result.blocked_reason,) if result.blocked_reason else ())
+        self.learning.record(experience, candidate_name=candidate_name, candidate_description=candidate_description)
+        if self.performance:
+            for agent_id in experience.agents_used:
+                self.performance.record(agent_id, task_type, environment.get("app", "unknown"), success=experience.success,
+                    verified=experience.verified, duration_ms=experience.execution_time_ms,
+                    resource_cost=sum(experience.resource_usage.values()))
+        self._journal(task.task_id, "LEARNING_EXPERIENCE_STORED", {"reused_skills": [skill.skill_id for skill in advice.skills],
+                                                                    "success": experience.success})
+        return result
 
     def _checkpoint(self, task: AutonomousTask, graph: TaskGraph) -> None:
         if not self.checkpoints:

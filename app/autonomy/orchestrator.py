@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 
 from app.agents.manager import AgentManager
 from app.agents.models import Agent
@@ -47,8 +48,10 @@ class AutonomousRuntime:
         self.registry, self.analyzer = registry or AgentRegistry(), analyzer or CapabilityAnalyzer()
         self.factory = AgentFactory(manager)
 
-    async def execute(self, root_agent_id: str, task_id: str, task: str, decider: DecisionProvider) -> AutonomousResult:
-        requirements = self.analyzer.analyze(task)
+    async def execute(self, root_agent_id: str, task_id: str, task: str, decider: DecisionProvider,
+                      requirements: TaskRequirements | None = None) -> AutonomousResult:
+        # Graph execution supplies validated requirements; ad-hoc execution is analysed.
+        requirements = requirements or self.analyzer.analyze(task)
         agent = self.registry.find(requirements)
         created = agent is None
         if agent is None:
@@ -70,5 +73,13 @@ class AutonomousRuntime:
             suffix = f" after {recovered} recovered failure(s)" if recovered else ""
             return f"Completed {successful} verified action(s){suffix}"
 
-        outcome = await self.manager.start_agent(root_agent_id, agent.agent_id, work)
+        started = monotonic()
+        try:
+            outcome = await self.manager.start_agent(root_agent_id, agent.agent_id, work)
+        except Exception:
+            self.registry.record_result(agent.agent_id, success=False, verified=False,
+                                        duration_ms=(monotonic() - started) * 1000)
+            raise
+        self.registry.record_result(agent.agent_id, success=True, verified=True,
+                                    duration_ms=(monotonic() - started) * 1000)
         return AutonomousResult(agent.agent_id, created, len(agent.execution_history), outcome)
