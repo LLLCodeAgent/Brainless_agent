@@ -1,0 +1,114 @@
+"""Provider contract and DOM-first base implementation."""
+from __future__ import annotations
+
+import asyncio
+from abc import ABC
+from dataclasses import dataclass
+
+from playwright.async_api import Locator, Page
+
+from app.browser.browser_manager import BrowserManager
+
+
+class ProviderError(RuntimeError):
+    """Raised when a provider's normal webpage cannot be used safely."""
+
+
+class UserInterventionRequired(ProviderError):
+    """Login, CAPTCHA, or similar security challenge requires the owner."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSelectors:
+    input: tuple[str, ...]
+    response: tuple[str, ...]
+    stop: tuple[str, ...]
+    copy: tuple[str, ...] = ()
+
+
+class ChatbotProvider(ABC):
+    name: str
+
+    def __init__(self, browser: BrowserManager, url: str, selectors: ProviderSelectors) -> None:
+        self.browser, self.url, self.selectors = browser, url, selectors
+        self.page: Page | None = None
+        self._response_count_before_submit = 0
+
+    async def open(self) -> None:
+        self.page = await self.browser.page_for(self.url)
+
+    async def verify_page(self) -> None:
+        page = self._require_page()
+        body = (await page.locator("body").inner_text()).lower()
+        if any(marker in body for marker in ("captcha", "verify you are human", "two-factor", "2fa")):
+            raise UserInterventionRequired("Security challenge detected; complete it manually, then retry.")
+        if not await self._first_visible(self.selectors.input):
+            if any(marker in body for marker in ("log in", "sign in", "login")):
+                raise UserInterventionRequired("Login is required. Sign in manually in the persistent Chrome window.")
+            raise ProviderError(f"{self.name} prompt input was not found")
+
+    async def start_conversation(self) -> None:
+        await self.verify_page()
+
+    async def send_prompt(self, prompt: str) -> None:
+        field = await self._first_visible(self.selectors.input)
+        if field is None:
+            raise ProviderError("Prompt input disappeared before submission")
+        self._response_count_before_submit = await self._response_count()
+        await field.click()
+        await field.fill(prompt)
+        await field.press("Enter")
+
+    async def wait_for_response(self, timeout_seconds: int = 180) -> None:
+        response = await self._first_visible(self.selectors.response)
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while response is None or await self._response_count() <= self._response_count_before_submit:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise ProviderError("No new response container appeared")
+            await asyncio.sleep(0.5)
+            response = await self._first_visible(self.selectors.response)
+        while not await self.is_response_complete():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise ProviderError(f"{self.name} response timed out")
+            await asyncio.sleep(1)
+
+    async def extract_response(self) -> str:
+        response = await self._first_visible(self.selectors.response)
+        text = (await response.last.inner_text()).strip() if response else ""
+        if not text:
+            raise ProviderError("Extracted response was empty")
+        return text
+
+    async def is_response_complete(self) -> bool:
+        page = self._require_page()
+        return not any(await page.locator(selector).count() and await page.locator(selector).first.is_visible()
+                       for selector in self.selectors.stop)
+
+    async def recover(self) -> None:
+        page = self._require_page()
+        await page.reload(wait_until="domcontentloaded")
+        await self.verify_page()
+
+    async def copy_latest_response(self) -> None:
+        """Click a provider-declared response Copy control for clipboard fallback."""
+        control = await self._first_visible(self.selectors.copy)
+        if control is None:
+            raise ProviderError(f"{self.name} does not expose a visible response copy control")
+        await control.click()
+
+    def _require_page(self) -> Page:
+        if self.page is None:
+            raise ProviderError("Provider must be opened before use")
+        return self.page
+
+    async def _first_visible(self, selectors: tuple[str, ...]) -> Locator | None:
+        page = self._require_page()
+        for selector in selectors:
+            locator = page.locator(selector)
+            if await locator.count() and await locator.first.is_visible():
+                return locator.first
+        return None
+
+    async def _response_count(self) -> int:
+        page = self._require_page()
+        return sum(await page.locator(selector).count() for selector in self.selectors.response)

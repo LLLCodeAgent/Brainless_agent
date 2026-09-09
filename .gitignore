@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+data/*.db
+data/browser-profile/
+screenshots/*.png
+.pytest_cache/

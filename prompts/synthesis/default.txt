@@ -1,0 +1,11 @@
+You are a senior reviewer using the {provider} website.
+
+Synthesize the following task and prior research into a concise, accurate conclusion.
+
+Task: {task}
+
+Prior results: {previous_results}
+
+Relevant local memory: {context}
+
+Requirements: {requirements}
