@@ -126,3 +126,25 @@ pytest
 ```
 
 These tests cover configuration, prompt rendering, local SQLite memory, state transitions, bounded recovery, provider registry behavior, and deterministic task parsing. Browser UI automation remains a manual integration test because it requires the owner's logged-in Chrome session.
+
+### Verified autonomy building blocks
+
+The autonomous runtime now maintains a versioned `WorldStateManager`. Controller observations become evidence-backed facts marked **observed**, **inferred**, **assumed**, or **stale**; tool return values do not update the world model. `ActionContract` optionally supplies runtime-checked preconditions, expected observed effects, retry idempotency, risk metadata, and rollback information. `TargetResolver` is provider-based and uses observed text only as a confidence-scored fallback, never blindly preferring coordinates.
+
+`TaskGraph` and `TaskScheduler` provide validated dependencies, conflict-aware runnable selection, retries, cancellation states, and safe replanning primitives. `ResourceLockManager` uses globally ordered locks, bounded waits, inspectable ownership, and failure cleanup. `CheckpointStore` writes atomically and intentionally requires a fresh environment observation before a resumed action can be executed. `RecoveryEngine` classifies permission, verification, and validation failures and refuses blind retry of non-idempotent actions.
+
+### Task-graph execution and recovery
+
+`AutonomousTaskEngine.run_graph()` executes a validated, mutable dependency graph through the existing agent factory/registry and `ActionRuntime`. It only schedules dependency-ready, non-conflicting work, keeps partial/blocked results explicit, and evaluates supplied `GoalCriterion` acceptance criteria after the graph finishes. The backward-compatible `run()` path is retained for current callers.
+
+Planning context is deliberately scoped: `TaskContextManager` supplies only observed facts and declared permissions to child work; external webpage/document content remains labelled untrusted data and cannot change policy, permissions, identity, or tool grants. `PlanValidator` rejects cyclic graphs, unavailable capabilities/permissions/tools, missing action contracts, and ungated high-risk tasks before execution.
+
+Contracts can set an execution timeout and retry idempotency. A safe retry is always preceded by a fresh controller observation; non-idempotent verification failures select re-observation rather than repeating the action. Checkpoint resumption likewise calls an observer before returning pending work and never replays actions by itself.
+
+`ActionRuntime` writes structured action/observation/verification journal records when given the existing SQLite journal store. `AutonomousTaskEngine` can receive a `CheckpointStore`; it snapshots graph status, retries, agent permissions/statuses, WorldState values, resource ownership, and pending nodes at plan creation and after each task transition. Restart code must call `CheckpointStore.resume(observer)`, which returns a newly observed environment alongside pending work rather than replaying an action.
+
+### Controlled experience and skills
+
+`app.learning` is a durable, advisory layer separate from execution. `ExperienceMemory` stores only structured runtime or human-approved execution outcomes and rejects externally sourced content; retrieval ranks goal/task/environment overlap and treats results as planning suggestions. `SkillRegistry` keeps versioned workflow definitions candidate-first: a skill cannot be registered as verified/trusted, and `SkillEvaluator` can reject a regressing candidate without changing the previous verified version. `WorkflowSynthesizer` turns discovered skills into a `TaskGraph`; the existing plan validator and action runtime remain responsible for permissions, contracts, resources, approval, execution, and verification.
+
+`LearningCoordinator` is the integration point for the experience-to-workflow loop: it persistently records verified runtime outcomes, produces candidate skills only from reusable structured workflows, then retrieves experience and verified skills for a later related goal. `SkillSandbox` statically validates candidate workflow permissions, capabilities, tools, contracts, and high-risk approval requirements with the existing `PlanValidator`; it cannot execute a skill or activate it.
