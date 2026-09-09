@@ -33,6 +33,7 @@ class ChatbotProvider(ABC):
         self.browser, self.url, self.selectors = browser, url, selectors
         self.page: Page | None = None
         self._response_count_before_submit = 0
+        self._response_counts_before_submit: dict[str, int] = {}
 
     async def open(self) -> None:
         self.page = await self.browser.page_for(self.url)
@@ -48,13 +49,23 @@ class ChatbotProvider(ABC):
             raise ProviderError(f"{self.name} prompt input was not found")
 
     async def start_conversation(self) -> None:
-        await self.verify_page()
+        """Focus the verified composer before the runtime sends a prompt.
+
+        Keeping this separate from :meth:`send_prompt` gives the runtime an
+        observable action boundary: a page can be valid while its composer is
+        covered by an onboarding dialog or otherwise not focusable.
+        """
+        field = await self._first_visible(self.selectors.input)
+        if field is None:
+            raise ProviderError("Prompt input disappeared before it could be focused")
+        await field.click()
 
     async def send_prompt(self, prompt: str) -> None:
         field = await self._first_visible(self.selectors.input)
         if field is None:
             raise ProviderError("Prompt input disappeared before submission")
-        self._response_count_before_submit = await self._response_count()
+        self._response_counts_before_submit = await self._response_counts()
+        self._response_count_before_submit = sum(self._response_counts_before_submit.values())
         await field.click()
         await field.fill(prompt)
         await field.press("Enter")
@@ -73,8 +84,8 @@ class ChatbotProvider(ABC):
             await asyncio.sleep(1)
 
     async def extract_response(self) -> str:
-        response = await self._first_visible(self.selectors.response)
-        text = (await response.last.inner_text()).strip() if response else ""
+        response = await self._latest_response()
+        text = (await response.inner_text()).strip() if response else ""
         if not text:
             raise ProviderError("Extracted response was empty")
         return text
@@ -110,5 +121,35 @@ class ChatbotProvider(ABC):
         return None
 
     async def _response_count(self) -> int:
+        return sum((await self._response_counts()).values())
+
+    async def _response_counts(self) -> dict[str, int]:
+        """Return per-selector counts so extraction can identify a newly added response."""
         page = self._require_page()
-        return sum(await page.locator(selector).count() for selector in self.selectors.response)
+        return {selector: await page.locator(selector).count() for selector in self.selectors.response}
+
+    async def _latest_response(self) -> Locator | None:
+        """Return the response added after the current prompt, not prior chat history.
+
+        Provider selectors can match several historic assistant turns.  The
+        count snapshot captured before submission lets us select the newest
+        node for the first selector that gained a visible response.
+        """
+        page = self._require_page()
+        counts = await self._response_counts()
+        for selector in self.selectors.response:
+            count = counts[selector]
+            if count <= self._response_counts_before_submit.get(selector, 0):
+                continue
+            response = page.locator(selector).nth(count - 1)
+            if await response.is_visible():
+                return response
+        # A DOM change can make a pre-submit snapshot unavailable (for example,
+        # after a provider reload).  Fall back to the last visible response.
+        for selector in self.selectors.response:
+            locator = page.locator(selector)
+            for index in range((await locator.count()) - 1, -1, -1):
+                response = locator.nth(index)
+                if await response.is_visible():
+                    return response
+        return None

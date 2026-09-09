@@ -13,7 +13,7 @@ The current implementation is an end-to-end browser-driven MVP:
 5. Runs multiple named providers and asks the selected synthesis provider to compare their labelled responses.
 6. Uses a logged runtime state machine, bounded response-extraction recovery, action/time budgets, and a cooperative emergency-stop latch.
 
-The provider interface and adapters are implemented now so the runtime has no provider-specific branches. Gemini and Claude selectors are included, but their current UIs evolve frequently; verify the configured DOM selectors after logging in. The cooperative stop latch is ready for a GUI or global-hotkey adapter; a system-wide hotkey, OCR/visual fallback, and desktop GUI remain future work.
+The provider interface and adapters are implemented now so the runtime has no provider-specific branches. Gemini and Claude selectors are included, but their current UIs evolve frequently; verify the configured DOM selectors after logging in. The desktop GUI and bounded DOM/clipboard/OCR response-extraction fallbacks are available now. A system-wide emergency hotkey and visual-anchor discovery remain future work.
 
 ## Architecture
 
@@ -21,6 +21,19 @@ The provider interface and adapters are implemented now so the runtime has no pr
 CLI -> AgentRuntime -> State/Prompt/SQLite Memory -> Provider Registry
     -> Provider Adapter -> BrowserManager -> persistent Chrome -> chatbot website
 ```
+
+### Hierarchical agents and tools
+
+The runtime also provides a local, typed `AgentManager` for work that benefits from delegation. A root agent creates child agents with an explicit task, narrowly scoped context, permissions, and tool allow-list. Child permissions must be a subset of their parent's permissions; a tool is only invoked after the registry verifies both the allow-list and every required capability. Global policy can auto-approve, require human approval, or deny sensitive capabilities.
+
+```text
+USER -> ROOT AGENT -> AGENT MANAGER
+                         |- Research child -> browser.read tool
+                         |- Coding child   -> explicitly granted tools
+                         `- Testing child  -> explicitly granted tools
+```
+
+Agent events record task, status, result, error, tool, and permission-denied outcomes. Independent children can run concurrently, and a parent can inspect the tree, collect results, retry bounded failures, pause, resume, or terminate direct children. The provider websites remain the reasoning layer; agent orchestration and tool permissions remain in Python.
 
 The runtime observes after navigation and before sending input. Provider adapters use DOM/accessibility locators instead of fixed screen coordinates. If a login, CAPTCHA, 2FA, or another security challenge is detected, the run stops and tells the user to complete it manually. The project never captures passwords, exports cookies, or attempts to bypass a security mechanism.
 
@@ -59,11 +72,11 @@ At the prompt, enter a task such as:
 Research resilient browser automation patterns.
 ```
 
-Mentioning more than one configured provider (for example, `compare chatgpt and gemini`) activates deterministic multi-provider task parsing. The runtime collects labelled answers and sends them to its selected synthesis provider (ChatGPT by default) for a final result.
+Mentioning more than one configured provider (for example, `compare chatgpt and gemini`) activates deterministic multi-provider task parsing. In the desktop UI, selecting more than one provider also creates a multi-provider workflow when Strategy is **automatic**. The runtime collects labelled answers and sends them to its selected synthesis provider (ChatGPT when selected, otherwise the first selected provider) for a final result.
 
 ## Configuration and prompts
 
-Provider URLs, persistent profile location, browser behavior, and bounded runtime limits are in `app/config/providers.yaml`. Prompt templates live in `prompts/<profile>/default.txt`; an optional `prompts/<profile>/<provider>.txt` overrides the default for one provider. Templates support `{task}`, `{previous_results}`, `{provider}`, `{context}`, and `{requirements}`. The runtime retrieves bounded, keyword-matched local context before the first provider prompt. The parser deterministically selects `research` or `coding` today.
+Provider URLs, persistent profile location, browser behavior, and bounded runtime limits are in `app/config/providers.yaml`. Prompt templates live in `prompts/<profile>/default.txt`; an optional `prompts/<profile>/<provider>.txt` overrides the default for one provider. Templates support `{task}`, `{previous_results}`, `{provider}`, `{context}`, and `{requirements}`. The runtime retrieves bounded, keyword-matched local context before the first provider prompt. The parser deterministically selects `research`, `coding`, or `analysis` today.
 
 ## Adding a provider
 

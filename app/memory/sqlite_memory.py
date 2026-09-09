@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from pathlib import Path
 
 from app.memory.models import MemoryRecord
@@ -17,6 +18,13 @@ class SQLiteMemory:
             provider TEXT NOT NULL, prompt TEXT NOT NULL, response TEXT NOT NULL,
             status TEXT NOT NULL, duration_seconds REAL NOT NULL, workflow TEXT NOT NULL,
             final_result INTEGER NOT NULL, error TEXT, screenshot_path TEXT)""")
+        self._connection.execute("""CREATE TABLE IF NOT EXISTS agent_records (
+            agent_id TEXT PRIMARY KEY, parent_agent_id TEXT, name TEXT NOT NULL, role TEXT NOT NULL,
+            objective TEXT NOT NULL, current_task TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL,
+            permissions_json TEXT NOT NULL, tools_json TEXT NOT NULL, result TEXT, error TEXT)""")
+        self._connection.execute("""CREATE TABLE IF NOT EXISTS agent_events (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, agent_id TEXT NOT NULL, parent_agent_id TEXT,
+            task_id TEXT, event_type TEXT NOT NULL, detail TEXT NOT NULL, metadata_json TEXT NOT NULL)""")
         columns = {row[1] for row in self._connection.execute("PRAGMA table_info(task_results)")}
         if "screenshot_path" not in columns:
             self._connection.execute("ALTER TABLE task_results ADD COLUMN screenshot_path TEXT")
@@ -43,3 +51,34 @@ class SQLiteMemory:
 
     def close(self) -> None:
         self._connection.close()
+
+    def store_agent(self, agent) -> None:
+        """Persist an agent snapshot without coupling memory to the orchestration package."""
+        self._connection.execute("""INSERT INTO agent_records
+            (agent_id,parent_agent_id,name,role,objective,current_task,status,created_at,permissions_json,tools_json,result,error)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(agent_id) DO UPDATE SET parent_agent_id=excluded.parent_agent_id,name=excluded.name,
+            role=excluded.role,objective=excluded.objective,current_task=excluded.current_task,status=excluded.status,
+            permissions_json=excluded.permissions_json,tools_json=excluded.tools_json,result=excluded.result,error=excluded.error""",
+            (agent.agent_id, agent.parent_agent_id, agent.name, agent.role, agent.objective, agent.current_task,
+             agent.status.value, agent.created_at.isoformat(), json.dumps(sorted(agent.permissions)),
+             json.dumps(sorted(agent.available_tools)), agent.result, agent.error))
+        self._connection.commit()
+
+    def store_agent_event(self, event) -> None:
+        self._connection.execute("""INSERT INTO agent_events
+            (timestamp,agent_id,parent_agent_id,task_id,event_type,detail,metadata_json) VALUES (?,?,?,?,?,?,?)""",
+            (event.timestamp.isoformat(), event.agent_id, event.parent_agent_id, event.task_id, event.type.value,
+             event.detail, json.dumps(event.metadata, sort_keys=True)))
+        self._connection.commit()
+
+    def agent_events(self, agent_id: str | None = None, limit: int = 100) -> list[dict[str, object]]:
+        query = "SELECT * FROM agent_events" + (" WHERE agent_id=?" if agent_id else "") + " ORDER BY id DESC LIMIT ?"
+        values = (agent_id, limit) if agent_id else (limit,)
+        return [dict(row) | {"metadata": json.loads(row["metadata_json"])}
+                for row in self._connection.execute(query, values).fetchall()]
+
+    def agent_records(self) -> list[dict[str, object]]:
+        return [dict(row) | {"permissions": json.loads(row["permissions_json"]),
+                              "tools": json.loads(row["tools_json"])}
+                for row in self._connection.execute("SELECT * FROM agent_records ORDER BY created_at").fetchall()]

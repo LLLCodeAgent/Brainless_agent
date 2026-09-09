@@ -100,6 +100,8 @@ class AgentRuntime:
             self.state.transition(RuntimeState.VERIFYING_PAGE)
             await self._verify_provider(provider_name, provider, task_started)
             await self._observe(provider_name, provider)
+            self.state.transition(RuntimeState.FOCUSING_INPUT)
+            await self._act(f"focus {provider_name} prompt input", provider.start_conversation, task_started)
             self.state.transition(RuntimeState.SENDING_PROMPT)
             await self._act(f"send {provider_name} prompt", lambda: provider.send_prompt(prompt), task_started)
             self.state.transition(RuntimeState.WAITING_RESPONSE)
@@ -124,25 +126,34 @@ class AgentRuntime:
     async def _act(self, description: str, operation, task_started: float) -> object:
         self.emergency_stop.raise_if_triggered()
         await self.pause.wait_until_resumed()
-        if time.monotonic() - task_started > self.max_task_seconds:
+        deadline = task_started + self.max_task_seconds
+        if time.monotonic() >= deadline:
             raise TaskDurationExceeded(f"Task exceeded {self.max_task_seconds / 60:g} minute limit")
         self.actions.record(description)
         active_operation = asyncio.create_task(operation())
         while not active_operation.done():
-            _, pending = await asyncio.wait({active_operation}, timeout=0.2)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                await self._cancel_operation(active_operation)
+                raise TaskDurationExceeded(f"Task exceeded {self.max_task_seconds / 60:g} minute limit")
+            _, pending = await asyncio.wait({active_operation}, timeout=min(0.2, remaining))
             if not pending:
                 break
             if self.emergency_stop.triggered:
-                active_operation.cancel()
-                with suppress(asyncio.CancelledError):
-                    await active_operation
+                await self._cancel_operation(active_operation)
                 self.emergency_stop.raise_if_triggered()
         return await active_operation
+
+    async def _cancel_operation(self, operation: asyncio.Task[object]) -> None:
+        operation.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation
 
     async def _extract_response(self, provider_name: str, provider, task_started: float) -> str:
         try:
             return await self._act(f"extract {provider_name} response",
-                lambda: self.recovery.run(provider.extract_response, provider.recover), task_started)
+                lambda: self.recovery.run(provider.extract_response,
+                                          lambda: self._recover_response(provider_name, provider)), task_started)
         except Exception as dom_error:
             try:
                 return await self._act(f"extract {provider_name} response from clipboard",
@@ -155,6 +166,14 @@ class AgentRuntime:
                     except Exception as ocr_error:
                         raise RuntimeError("DOM, clipboard, and OCR response extraction failed") from ocr_error
                 raise RuntimeError("DOM and clipboard response extraction failed") from clipboard_error
+
+    async def _recover_response(self, provider_name: str, provider) -> None:
+        """Reload, observe, and return to extraction after a bounded DOM retry."""
+        self.state.transition(RuntimeState.RECOVERING)
+        self.actions.record(f"recover {provider_name} response")
+        await provider.recover()
+        await self._observe(provider_name, provider)
+        self.state.transition(RuntimeState.EXTRACTING_RESPONSE)
 
     async def _verify_provider(self, provider_name: str, provider, task_started: float) -> None:
         while True:
