@@ -12,3 +12,9 @@ def test_task_parser_detects_multi_provider_request() -> None:
     assert task.providers == ["chatgpt", "gemini"]
     assert task.synthesis is True
     assert task.synthesis_provider == "chatgpt"
+
+
+def test_task_parser_selects_analysis_profile_and_avoids_provider_substrings() -> None:
+    task = parse_task("Analyze Claude's approach, not myclaude-copy", ("claude", "gemini"))
+    assert task.category == "analysis"
+    assert task.providers == ["claude"]

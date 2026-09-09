@@ -11,6 +11,12 @@ def test_state_transitions_are_recorded() -> None:
     assert manager.history == [RuntimeState.IDLE, RuntimeState.INITIALIZING, RuntimeState.COMPLETED]
 
 
+def test_focusing_input_is_an_explicit_runtime_state() -> None:
+    manager = StateManager()
+    manager.transition(RuntimeState.FOCUSING_INPUT)
+    assert manager.state is RuntimeState.FOCUSING_INPUT
+
+
 def test_recovery_retries_after_failure() -> None:
     attempts = 0
     recoveries = 0

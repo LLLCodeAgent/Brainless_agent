@@ -4,7 +4,7 @@ import logging
 
 class RuntimeState(str, Enum):
     IDLE = "idle"; INITIALIZING = "initializing"; PLANNING = "planning"
-    OPENING_BROWSER = "opening_browser"; VERIFYING_PAGE = "verifying_page"
+    OPENING_BROWSER = "opening_browser"; VERIFYING_PAGE = "verifying_page"; FOCUSING_INPUT = "focusing_input"
     SENDING_PROMPT = "sending_prompt"; WAITING_RESPONSE = "waiting_response"
     EXTRACTING_RESPONSE = "extracting_response"; VALIDATING_RESPONSE = "validating_response"
     STORING_RESULT = "storing_result"; COMPLETED = "completed"; FAILED = "failed"
