@@ -93,3 +93,13 @@ def test_authorized_create_mission_uses_operator_and_validates_input(tmp_path):
     assert result["accepted"] and mission.goal == "Monitor project" and mission.priority == 4
     with pytest.raises(ValueError):
         asyncio.run(gateway.execute(TOKEN, "create_mission", {"goal": ""}))
+
+
+def test_analytics_use_real_denominators_and_report_unavailable_without_data(tmp_path):
+    runtime, service, _ = dashboard(tmp_path)
+    assert service.analytics()["mission_success_rate"] is None
+    runtime.missions.save(Mission("done", "user", status=MissionStatus.COMPLETED,
+        task_graph={"task": {"objective": "done", "status": "completed", "retries": 0}}))
+    analytics = service.snapshot()["analytics"]
+    assert analytics["mission_success_rate"] == 1.0
+    assert analytics["task_success_rate"] == 1.0

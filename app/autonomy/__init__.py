@@ -31,3 +31,5 @@ from app.autonomy.triggers import FilesystemWatcher, ProcessWatcher, Trigger, Tr
 from app.autonomy.benchmark import BenchmarkHarness, BenchmarkResult
 from app.autonomy.monitoring import AutonomyMetrics, Interruption, InterruptionKind, InterruptionManager, UserPresenceDetector
 from app.autonomy.event_store import EventStore
+
+from app.autonomy.production_mission import RuntimeMissionComposer, VerifiedMissionCriterion

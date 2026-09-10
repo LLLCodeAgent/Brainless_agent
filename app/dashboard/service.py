@@ -138,6 +138,7 @@ class DashboardService:
             "recovery": [event for event in self.events() if event["event_type"] in {"agent_failed", "task_failed"}],
             "security": [action for action in actions if action["error"] or action["policy_decision"] != "auto_approve"],
             "logs": self.events(),
+            "notifications": self.notifications(), "analytics": self.analytics(missions, tasks, agents, actions),
         }
 
     def health(self) -> list[dict[str, str]]:
@@ -173,6 +174,35 @@ class DashboardService:
                 "agents": len(self.runtime.agents.list_agents()),
                 "permissions": sorted({permission for agent in self.runtime.agents.list_agents() for permission in agent.permissions}),
                 "providers": list(self.runtime.provider_names)}
+
+    def notifications(self) -> list[dict[str, Any]]:
+        important = {"task_completed", "task_failed", "agent_failed", "approval_received", "user_takeover"}
+        return [event for event in self.events() if event["event_type"] in important or event["severity"] in {"error", "critical"}]
+
+    def analytics(self, missions=None, tasks=None, agents=None, actions=None) -> dict[str, float | int | None]:
+        missions = missions if missions is not None else [self._mission(item) for item in self.runtime.missions.all()]
+        tasks = tasks if tasks is not None else [task for mission in missions for task in mission["tasks"]]
+        agents = agents if agents is not None else [self._agent(item) for item in self.runtime.agents.list_agents()]
+        actions = actions if actions is not None else [self._action(item) for item in self.runtime.actions.audit]
+        terminal_missions = [item for item in missions if item["status"] in {"completed", "failed", "cancelled", "partially_completed"}]
+        terminal_tasks = [item for item in tasks if item["status"] in {"completed", "failed", "cancelled"}]
+        successful_actions = [item for item in actions if not item["error"]]
+        recovery_events = [item for item in self.events() if item["event_type"] in {"agent_failed", "task_failed"}]
+        interventions = [item for item in self.events() if item["payload"].get("command") == "take_over"]
+        return {
+            "mission_success_rate": _ratio(sum(item["status"] == "completed" for item in terminal_missions), len(terminal_missions)),
+            "task_success_rate": _ratio(sum(item["status"] == "completed" for item in terminal_tasks), len(terminal_tasks)),
+            "verification_score": _ratio(len(successful_actions), len(actions)),
+            "recovery_score": None if not recovery_events else _ratio(sum(item["status"] == "completed" for item in recovery_events), len(recovery_events)),
+            "autonomy_score": _ratio(max(0, sum(item["status"] == "completed" for item in terminal_missions) - len(interventions)), len(terminal_missions)),
+            "average_action_duration_ms": (sum(item["duration_ms"] for item in actions) / len(actions)) if actions else None,
+            "retry_rate": _ratio(sum(int(item.get("retries", 0)) for item in tasks), len(tasks)),
+            "user_intervention_rate": _ratio(len(interventions), len(terminal_missions)),
+            "agent_failure_rate": _ratio(sum(item["status"] == "failed" for item in agents), len(agents)),
+            "approval_rate": _ratio(sum(item["approval_status"] == "approved" for item in actions),
+                                    sum(item["approval_status"] in {"approved", "denied"} for item in actions)),
+            "blocked_task_rate": _ratio(sum(item["status"] == "blocked" for item in tasks), len(tasks)),
+        }
 
     def _mission(self, mission: Mission) -> dict[str, Any]:
         tasks = [{"task_id": task_id, "mission_id": mission.mission_id,
@@ -227,3 +257,7 @@ def _redact(value: Any) -> Any:
                 for key, item in value.items()}
     if isinstance(value, (list, tuple)): return [_redact(item) for item in value]
     return value
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    return numerator / denominator if denominator else None
