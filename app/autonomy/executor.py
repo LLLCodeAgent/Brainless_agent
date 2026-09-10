@@ -15,6 +15,7 @@ from app.autonomy.world_state import WorldStateManager
 from app.autonomy.world_model import WorldModel
 from app.autonomy.proposals import ProposalRejected, ProposalValidator
 from app.autonomy.mode_policy import ModePolicy
+from app.autonomy.governor import AutonomyGovernor, GovernorDecision
 from app.autonomy.models import (ActionProposal, ActionResult, AuditRecord, ComputerAction,
                                  ComputerState, DecisionContext, ErrorCode, RuntimeErrorDetail)
 from app.autonomy.resources import ResourceLockManager
@@ -41,16 +42,19 @@ class ActionRuntime:
                  recovery: RecoveryEngine | None = None,
                  limits: AutonomyLimits | None = None, journal=None,
                  proposal_validator: ProposalValidator | None = None,
-                 world_model: WorldModel | None = None, mode_policy: ModePolicy | None = None) -> None:
+                 world_model: WorldModel | None = None, mode_policy: ModePolicy | None = None,
+                 governor: AutonomyGovernor | None = None) -> None:
         self.manager, self.controller = manager, controller
         self.locks, self.verifier = locks or ResourceLockManager(), verifier or _verify
         self.world_state, self.contracts = world_state or WorldStateManager(), contracts or {}
         self.world_model = world_model or WorldModel(self.world_state)
         self.mode_policy = mode_policy or ModePolicy()
+        self.governor = governor or AutonomyGovernor()
         self.recovery, self.recovery_events = recovery or RecoveryEngine(), []
         self.limits = limits or AutonomyLimits()
         self.journal = journal
         self.approval_handler, self.audit, self._audit_store = approval_handler, [], audit_store
+        self._completed_actions: dict[str, ActionResult] = {}
         self._register_controller_tools()
         # The validator is runtime-owned and is also applied to legacy ActionProposal
         # callers, so no provider-shaped input can reach a tool unchecked.
@@ -85,6 +89,10 @@ class ActionRuntime:
         return await self.perform(request.to_computer_action(proposal.reason))
 
     async def perform(self, action: ComputerAction) -> ActionResult:
+        # An action identity is single-use within a runtime. Recovery must
+        # re-observe and create a new action instead of replaying side effects.
+        if action.action_id in self._completed_actions:
+            return self._completed_actions[action.action_id]
         started = monotonic()
         self._journal(action.task_id, "ACTION_STARTED", {"action_id": action.action_id, "tool": action.action_type})
         policy_decision, approval_status = "auto_approve", "not_required"
@@ -94,7 +102,11 @@ class ActionRuntime:
             return self._result(action, False, "Tool is not registered", started, ErrorCode.TOOL_NOT_FOUND)
         if action.permission not in tool.required_permissions:
             return self._result(action, False, "Action permission does not match registered tool", started, ErrorCode.INVALID_ARGUMENT)
-        mode_decision = self.mode_policy.decision(tool)
+        governed = self.governor.evaluate(action, tool)
+        if governed.decision is GovernorDecision.DENY:
+            return self._result(action, False, governed.reason, started, ErrorCode.POLICY_DENIED,
+                                policy=f"governor:{governed.reason}")
+        mode_decision = "approval" if governed.decision is GovernorDecision.APPROVAL else self.mode_policy.decision(tool)
         if mode_decision == "deny":
             return self._result(action, False, "Autonomy mode forbids this action", started, ErrorCode.POLICY_DENIED, policy="mode_deny")
         if mode_decision == "approval":
@@ -219,6 +231,8 @@ class ActionRuntime:
                 policy: str = "auto_approve", approval: str = "not_required") -> ActionResult:
         result = ActionResult(action.action_id, success, output, f"{code.value}: {error}" if code else error, verified,
                               (monotonic() - started) * 1000)
+        self._completed_actions[action.action_id] = result
+        self.governor.record(action.task_id, success)
         agent = self.manager.get_agent(action.agent_id)
         record = AuditRecord(action.timestamp, action.agent_id, agent.parent_agent_id, action.task_id, action.action_id,
             action.action_type, action.permission, _redact_arguments(action.arguments), str(output) if output is not None else None,

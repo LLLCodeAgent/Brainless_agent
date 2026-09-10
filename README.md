@@ -74,6 +74,10 @@ Runtime agent and action records are incrementally bridged into correlated dashb
 
 The dashboard builds an authoritative task-to-mission index from persisted mission graphs and uses it to correlate agents, action audits, and events that carry only a task ID. Selecting a mission opens a drill-down with its objective, policy, acceptance criteria, constraints, task graph, assigned agents, and correlated event timeline. Correlation is a read-only projection: it never rewrites event, agent, action, or mission records.
 
+`AutonomyGovernor` is the final deterministic mission gate before mode policy, permissions, resources, and tool execution. `RuntimeMissionComposer` registers mission-scoped task IDs and least-privilege contracts containing allowed tools, allowed permissions, forbidden actions, confidence thresholds, and action/failure budgets. High-risk contracted actions require independent approval; exhausted budgets and out-of-contract authority are denied. Mission drill-downs expose the contract and real budget consumption. The reasoning provider cannot register contracts or make governor decisions.
+
+`ActionRuntime` also treats an action ID as single-use for the lifetime of a runtime process. A duplicate delivery returns the original result without acquiring resources or repeating side effects. Restart recovery remains checkpoint-driven: it re-observes and verifies environmental state rather than blindly replaying an action.
+
 ### Dashboard security and deployment
 
 The server binds to loopback by default. Put it behind an authenticated TLS reverse proxy for remote access and rotate `BRAINLESS_DASHBOARD_TOKEN` operationally. Read endpoints and SSE require the token; mutation requests are schema-limited, size-bounded, authenticated, and routed through the runtime command gateway. Responses add restrictive framing, content-type, referrer, browser-permission, and content-security headers. Sensitive argument and state keys are recursively redacted. The dashboard cannot grant permissions, execute tools, write WorldState, or contact a reasoning provider.

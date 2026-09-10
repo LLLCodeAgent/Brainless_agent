@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.autonomy.mission import Mission
 from app.autonomy.task_graph import GraphTask, TaskGraph
 from app.autonomy.task_runner import TaskEngineMissionRunner
+from app.autonomy.governor import MissionContract
 
 
 class VerifiedMissionCriterion:
@@ -30,7 +31,9 @@ class RuntimeMissionComposer:
         previous = None
         for index, tool_id in enumerate(sorted(requirements.tools)):
             tool = self.actions.manager.tools.get(tool_id)
-            task_id = f"objective:{index}"
+            # Mission-scoped IDs prevent cross-mission authority, audit, and
+            # dashboard-correlation collisions.
+            task_id = f"{mission.mission_id}:objective:{index}"
             graph.add(GraphTask(task_id, mission.goal,
                                 dependencies={previous} if previous else set(),
                                 capabilities=requirements.capabilities,
@@ -40,6 +43,16 @@ class RuntimeMissionComposer:
             previous = task_id
         if not graph.tasks:
             raise ValueError("Mission requires no executable capability; user clarification is required")
+        permissions = frozenset(permission for task in graph.tasks.values() for permission in task.permissions)
+        budget = mission.resource_policy if isinstance(mission.resource_policy, dict) else {}
+        self.actions.governor.register(MissionContract(
+            mission.mission_id,
+            allowed_tools=frozenset(task.tool for task in graph.tasks.values() if task.tool),
+            allowed_permissions=permissions,
+            forbidden_actions=frozenset(mission.current_state.get("forbidden_actions", ())),
+            max_actions=int(budget.get("max_actions", 1_000)),
+            max_failures=int(budget.get("max_failures", 10)),
+            minimum_confidence=float(budget.get("minimum_confidence", .5))), set(graph.tasks))
         return graph
 
     def criteria_for(self, mission: Mission):

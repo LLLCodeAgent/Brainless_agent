@@ -155,6 +155,7 @@ class DashboardService:
             "logs": events,
             "notifications": self.notifications(), "analytics": self.analytics(missions, tasks, agents, actions),
             "memory": self.memory(), "skills": self.skills(),
+            "governance": self.runtime.actions.governor.snapshot(),
         }
 
     def health(self) -> list[dict[str, str]]:

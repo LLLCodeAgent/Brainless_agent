@@ -128,3 +128,52 @@ def test_supervised_runtime_waits_for_independent_approval_before_execution(tmp_
             return "done"
         await manager.start_agent(root.agent_id, child.agent_id, work)
     asyncio.run(scenario())
+
+
+def test_autonomy_governor_enforces_mission_authority_and_budgets(tmp_path):
+    from app.agents.manager import AgentManager
+    from app.autonomy.controllers import FilesystemComputerController
+    from app.autonomy.executor import ActionRuntime
+    from app.autonomy.governor import MissionContract
+    from app.autonomy.models import ActionProposal
+    from app.safety.permissions import Permission
+
+    async def scenario():
+        manager = AgentManager()
+        root = manager.create_root("root", "root", "goal", {Permission.FILESYSTEM_WRITE.value})
+        runtime = ActionRuntime(manager, FilesystemComputerController(tmp_path))
+        agent = manager.create_agent(root.agent_id, "writer", "writer", "write", task="write",
+            permissions={Permission.FILESYSTEM_WRITE.value}, tools={"filesystem.write"}, task_id="m:task")
+        runtime.governor.register(MissionContract("m", allowed_tools=frozenset({"filesystem.write"}),
+            allowed_permissions=frozenset({Permission.FILESYSTEM_WRITE.value}), max_actions=1), {"m:task"})
+        # High-risk contracted actions require independent approval.
+        first = await runtime.perform_proposal(agent.agent_id, "m:task",
+            ActionProposal("filesystem.write", {"path": "one", "content": "one"}, "write"))
+        assert not first.success and "APPROVAL_REQUIRED" in first.error
+        # The failed attempt consumes the explicit action/failure accounting budget.
+        second = await runtime.perform_proposal(agent.agent_id, "m:task",
+            ActionProposal("filesystem.write", {"path": "two", "content": "two"}, "write"))
+        assert not second.success and "mission_budget_exhausted" in second.error
+        assert not (tmp_path / "one").exists() and not (tmp_path / "two").exists()
+    asyncio.run(scenario())
+
+
+def test_runtime_deduplicates_same_action_identity(tmp_path):
+    from app.agents.manager import AgentManager
+    from app.autonomy.controllers import FilesystemComputerController
+    from app.autonomy.executor import ActionRuntime
+    from app.autonomy.models import ComputerAction
+    from app.safety.permissions import Permission
+
+    async def scenario():
+        manager = AgentManager()
+        root = manager.create_root("root", "root", "goal", {Permission.FILESYSTEM_WRITE.value})
+        runtime = ActionRuntime(manager, FilesystemComputerController(tmp_path))
+        agent = manager.create_agent(root.agent_id, "writer", "writer", "write", task="write",
+            permissions={Permission.FILESYSTEM_WRITE.value}, tools={"filesystem.write"}, task_id="task")
+        action = ComputerAction("filesystem.write", {"path": "once", "content": "value"},
+            agent.agent_id, "task", "write once", Permission.FILESYSTEM_WRITE.value)
+        first = await runtime.perform(action)
+        second = await runtime.perform(action)
+        assert first is second and len(runtime.audit) == 1
+    asyncio.run(scenario())
