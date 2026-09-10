@@ -50,6 +50,7 @@ class Experience:
     actions: tuple[dict[str, Any], ...] = ()
     failures: tuple[str, ...] = ()
     recovery_steps: tuple[str, ...] = ()
+    causal_evidence: tuple[dict[str, Any], ...] = ()
     execution_time_ms: float = 0.0
     risk_level: str = "low"
     source: ExperienceSource = ExperienceSource.RUNTIME
@@ -215,7 +216,7 @@ class WorkflowSynthesizer:
 
 def _terms(text: str) -> list[str]: return re.findall(r"[a-z0-9_]+", text.casefold())
 def _experience(data: dict[str, Any]) -> Experience:
-    data["source"] = ExperienceSource(data["source"]); data["agents_used"] = tuple(data.get("agents_used", ())); data["observations"] = tuple(data.get("observations", ())); data["verification_results"] = tuple(data.get("verification_results", ())); data["capabilities_used"] = tuple(data.get("capabilities_used", ())); data["tools_used"] = tuple(data.get("tools_used", ())); data["actions"] = tuple(data.get("actions", ())); data["failures"] = tuple(data.get("failures", ())); data["recovery_steps"] = tuple(data.get("recovery_steps", ())); return Experience(**data)
+    data["source"] = ExperienceSource(data["source"]); data["agents_used"] = tuple(data.get("agents_used", ())); data["observations"] = tuple(data.get("observations", ())); data["verification_results"] = tuple(data.get("verification_results", ())); data["capabilities_used"] = tuple(data.get("capabilities_used", ())); data["tools_used"] = tuple(data.get("tools_used", ())); data["actions"] = tuple(data.get("actions", ())); data["failures"] = tuple(data.get("failures", ())); data["recovery_steps"] = tuple(data.get("recovery_steps", ())); data["causal_evidence"] = tuple(data.get("causal_evidence", ())); return Experience(**data)
 def _skill_dict(skill: Skill) -> dict[str, Any]:
     data = asdict(skill); data["required_capabilities"] = sorted(skill.required_capabilities); data["required_permissions"] = sorted(skill.required_permissions); data["status"] = skill.status.value; return data
 def _skill(data: dict[str, Any]) -> Skill:

@@ -12,6 +12,9 @@ from app.autonomy.controllers import ComputerController
 from app.autonomy.config import AutonomyLimits
 from app.autonomy.contracts import ActionContract
 from app.autonomy.world_state import WorldStateManager
+from app.autonomy.world_model import WorldModel
+from app.autonomy.proposals import ProposalRejected, ProposalValidator
+from app.autonomy.mode_policy import ModePolicy
 from app.autonomy.models import (ActionProposal, ActionResult, AuditRecord, ComputerAction,
                                  ComputerState, DecisionContext, ErrorCode, RuntimeErrorDetail)
 from app.autonomy.resources import ResourceLockManager
@@ -36,15 +39,22 @@ class ActionRuntime:
                  world_state: WorldStateManager | None = None,
                  contracts: dict[str, ActionContract] | None = None,
                  recovery: RecoveryEngine | None = None,
-                 limits: AutonomyLimits | None = None, journal=None) -> None:
+                 limits: AutonomyLimits | None = None, journal=None,
+                 proposal_validator: ProposalValidator | None = None,
+                 world_model: WorldModel | None = None, mode_policy: ModePolicy | None = None) -> None:
         self.manager, self.controller = manager, controller
         self.locks, self.verifier = locks or ResourceLockManager(), verifier or _verify
         self.world_state, self.contracts = world_state or WorldStateManager(), contracts or {}
+        self.world_model = world_model or WorldModel(self.world_state)
+        self.mode_policy = mode_policy or ModePolicy()
         self.recovery, self.recovery_events = recovery or RecoveryEngine(), []
         self.limits = limits or AutonomyLimits()
         self.journal = journal
         self.approval_handler, self.audit, self._audit_store = approval_handler, [], audit_store
         self._register_controller_tools()
+        # The validator is runtime-owned and is also applied to legacy ActionProposal
+        # callers, so no provider-shaped input can reach a tool unchecked.
+        self.proposal_validator = proposal_validator or ProposalValidator(manager, contracts=self.contracts)
 
     def _register_controller_tools(self) -> None:
         definitions = {
@@ -67,16 +77,12 @@ class ActionRuntime:
 
     async def perform_proposal(self, agent_id: str, task_id: str, proposal: ActionProposal) -> ActionResult:
         try:
-            tool = self.manager.tools.get(proposal.action_type)
-        except KeyError:
+            request = self.proposal_validator.validate_action(agent_id, task_id, proposal)
+        except (ProposalRejected, KeyError) as error:
             action = ComputerAction(proposal.action_type, proposal.arguments, agent_id, task_id, proposal.reason, "")
-            return self._result(action, False, "Tool is not registered", monotonic(), ErrorCode.TOOL_NOT_FOUND)
-        if len(tool.required_permissions) != 1:
-            action = ComputerAction(proposal.action_type, proposal.arguments, agent_id, task_id, proposal.reason, "")
-            return self._result(action, False, "Computer actions require one declared permission", monotonic(), ErrorCode.INVALID_ARGUMENT)
-        action = ComputerAction(proposal.action_type, proposal.arguments, agent_id, task_id, proposal.reason,
-                                next(iter(tool.required_permissions)), proposal.expected_state)
-        return await self.perform(action)
+            code = ErrorCode.TOOL_NOT_FOUND if "not registered" in str(error) else ErrorCode.INVALID_ARGUMENT
+            return self._result(action, False, str(error), monotonic(), code)
+        return await self.perform(request.to_computer_action(proposal.reason))
 
     async def perform(self, action: ComputerAction) -> ActionResult:
         started = monotonic()
@@ -88,6 +94,11 @@ class ActionRuntime:
             return self._result(action, False, "Tool is not registered", started, ErrorCode.TOOL_NOT_FOUND)
         if action.permission not in tool.required_permissions:
             return self._result(action, False, "Action permission does not match registered tool", started, ErrorCode.INVALID_ARGUMENT)
+        mode_decision = self.mode_policy.decision(tool)
+        if mode_decision == "deny":
+            return self._result(action, False, "Autonomy mode forbids this action", started, ErrorCode.POLICY_DENIED, policy="mode_deny")
+        if mode_decision == "approval" and self.approval_handler is None:
+            return self._result(action, False, "Autonomy mode requires approval", started, ErrorCode.APPROVAL_REQUIRED, policy="mode_approval", approval="required")
         contract = self.contracts.get(action.action_type)
         if contract:
             if contract.tool != action.action_type or action.permission not in contract.required_permissions:
@@ -120,6 +131,8 @@ class ActionRuntime:
                 # AgentManager enforces allow-list, permission, policy, schema, and records the tool event.
                 before = await self.controller.observe()
                 before_snapshot = self.world_state.capture(before, source="before_action", evidence=action.action_id)
+                prediction = self.world_model.predict(action.action_id, action.expected_state)
+                self._journal(action.task_id, "PREDICTION_RECORDED", {"action_id": prediction.action_id, "before_version": prediction.before_version, "expected": prediction.expected, "confidence": prediction.confidence})
                 self._journal(action.task_id, "OBSERVATION_CAPTURED", {"action_id": action.action_id, "phase": "before", "world_version": before_snapshot.version})
                 if contract and contract.timeout_seconds is not None:
                     async with asyncio.timeout(contract.timeout_seconds):
@@ -128,6 +141,8 @@ class ActionRuntime:
                     output = await self.manager.execute_tool(action.agent_id, action.action_type, action.arguments)
                 observed = await self.controller.observe()
                 after_snapshot = self.world_state.capture(observed, source="after_action", evidence=action.action_id)
+                comparison = self.world_model.compare(action.action_id, after_snapshot)
+                self._journal(action.task_id, "PREDICTION_COMPARED", {"action_id": action.action_id, "observed_version": comparison.observed_version, "differences": comparison.differences, "invalidated": comparison.invalidated, "causal_evidence": self.world_model.export_state()["causal_evidence"]})
                 self._journal(action.task_id, "OBSERVATION_CAPTURED", {"action_id": action.action_id, "phase": "after", "world_version": after_snapshot.version})
         except PermissionDenied as error:
             return self._result(action, False, str(error), started, ErrorCode.PERMISSION_DENIED,
@@ -148,6 +163,9 @@ class ActionRuntime:
         if contract:
             expected = {**contract.expected_effects, **expected}
         verified = self.verifier(expected, observed, output)
+        # A prediction mismatch is evidence for replanning, not an instruction to retry.
+        if comparison.invalidated and expected:
+            verified = False
         if action.expected_state.get("state_changed"):
             verified = verified and bool(self.world_state.diff(before_snapshot, after_snapshot))
         return self._result(action, verified, None if verified else "Expected state was not observed", started,
