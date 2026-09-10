@@ -10,6 +10,7 @@ from uuid import uuid4
 from app.agents.models import Agent, AgentEvent, AgentStatus, EventType, ToolExecution
 from app.agents.tools import ToolRegistry
 from app.safety.permissions import PermissionDenied, PermissionPolicy
+from app.safety.leases import CapabilityLease, CapabilityLeaseRegistry
 
 AgentExecutor = Callable[[Agent, "AgentManager"], Awaitable[str]]
 
@@ -24,6 +25,7 @@ class AgentManager:
         self.events: list[AgentEvent] = []
         self._running: dict[str, asyncio.Task[str]] = {}
         self._audit_store = audit_store
+        self.leases = CapabilityLeaseRegistry()
 
     def create_root(self, name: str, role: str, objective: str, permissions: set[str]) -> Agent:
         if any(agent.parent_agent_id is None for agent in self._agents.values()):
@@ -104,6 +106,18 @@ class AgentManager:
         child = self._owned_child(parent_agent_id, agent_id)
         child.permissions.discard(permission)
         self._event(child, EventType.STATUS, "Permission revoked", {"permission": permission})
+
+    def lease_permission(self, parent_agent_id: str, agent_id: str, permission: str,
+                         task_id: str, seconds: int = 300) -> CapabilityLease:
+        """Temporarily delegate parent-owned authority to one agent and task."""
+        parent, child = self.get_agent(parent_agent_id), self._owned_child(parent_agent_id, agent_id)
+        if permission not in parent.permissions or child.current_task_id != task_id:
+            self._deny(child.agent_id, child.parent_agent_id, permission, "Lease authority or task scope is invalid")
+            raise PermissionDenied(child.agent_id, permission, "Lease authority or task scope is invalid")
+        lease = self.leases.grant(child.agent_id, permission, task_id, seconds)
+        self._event(child, EventType.STATUS, "Capability leased", {"permission": permission,
+                    "task_id": task_id, "lease_id": lease.lease_id, "expires_at": lease.expires_at.isoformat()})
+        return lease
 
     def grant_tool(self, parent_agent_id: str, agent_id: str, tool_id: str) -> None:
         """Authorize a registered tool for a direct child after its permissions exist."""
@@ -186,7 +200,8 @@ class AgentManager:
             raise PermissionDenied(agent.agent_id, tool_id, "Tool was not granted to this agent")
         tool = self.tools.get(tool_id)
         for permission in tool.required_permissions:
-            if permission not in agent.permissions:
+            if permission not in agent.permissions and not self.leases.permits(
+                    agent.agent_id, permission, agent.current_task_id):
                 self._deny(agent.agent_id, agent.parent_agent_id, permission, "Agent does not possess this permission")
                 raise PermissionDenied(agent.agent_id, permission, "Agent does not possess this permission")
             try:

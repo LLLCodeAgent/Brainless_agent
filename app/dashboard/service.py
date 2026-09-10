@@ -156,6 +156,11 @@ class DashboardService:
             "notifications": self.notifications(), "analytics": self.analytics(missions, tasks, agents, actions),
             "memory": self.memory(), "skills": self.skills(),
             "governance": self.runtime.actions.governor.snapshot(),
+            "leases": [{"lease_id": item.lease_id, "agent_id": item.agent_id,
+                        "permission": item.permission, "task_id": item.task_id,
+                        "mission_id": task_missions.get(item.task_id), "status": "active",
+                        "granted_at": item.granted_at.isoformat(), "expires_at": item.expires_at.isoformat()}
+                       for item in self.runtime.agents.leases.active()],
         }
 
     def health(self) -> list[dict[str, str]]:

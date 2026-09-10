@@ -78,6 +78,8 @@ The dashboard builds an authoritative task-to-mission index from persisted missi
 
 `ActionRuntime` also treats an action ID as single-use for the lifetime of a runtime process. A duplicate delivery returns the original result without acquiring resources or repeating side effects. Restart recovery remains checkpoint-driven: it re-observes and verifies environmental state rather than blindly replaying an action.
 
+Temporary capabilities use `CapabilityLeaseRegistry`. A parent may lease only authority it already possesses, to a direct child, for that child's current task, for at most 24 hours. Tool execution accepts an active matching lease in place of a permanent permission; revocation, expiry, task reassignment, or process restart fails closed. The dashboard shows active lease metadata and expiry times but cannot issue leases.
+
 ### Dashboard security and deployment
 
 The server binds to loopback by default. Put it behind an authenticated TLS reverse proxy for remote access and rotate `BRAINLESS_DASHBOARD_TOKEN` operationally. Read endpoints and SSE require the token; mutation requests are schema-limited, size-bounded, authenticated, and routed through the runtime command gateway. Responses add restrictive framing, content-type, referrer, browser-permission, and content-security headers. Sensitive argument and state keys are recursively redacted. The dashboard cannot grant permissions, execute tools, write WorldState, or contact a reasoning provider.

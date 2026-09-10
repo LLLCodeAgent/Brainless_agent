@@ -177,3 +177,24 @@ def test_runtime_deduplicates_same_action_identity(tmp_path):
         second = await runtime.perform(action)
         assert first is second and len(runtime.audit) == 1
     asyncio.run(scenario())
+
+
+def test_capability_lease_is_task_scoped_and_fail_closed_on_revoke(tmp_path):
+    from app.agents.manager import AgentManager
+    from app.autonomy.controllers import FilesystemComputerController
+    from app.autonomy.executor import ActionRuntime
+    from app.safety.permissions import Permission
+
+    async def scenario():
+        manager = AgentManager()
+        root = manager.create_root("root", "root", "goal", {Permission.FILESYSTEM_READ.value})
+        ActionRuntime(manager, FilesystemComputerController(tmp_path))
+        child = manager.create_agent(root.agent_id, "reader", "reader", "read", task="read",
+            task_id="mission:read", permissions={Permission.FILESYSTEM_READ.value}, tools={"filesystem.read"})
+        manager.revoke_permission(root.agent_id, child.agent_id, Permission.FILESYSTEM_READ.value)
+        lease = manager.lease_permission(root.agent_id, child.agent_id, Permission.FILESYSTEM_READ.value,
+                                         "mission:read", seconds=60)
+        assert manager.leases.permits(child.agent_id, Permission.FILESYSTEM_READ.value, "mission:read")
+        manager.leases.revoke(lease.lease_id)
+        assert not manager.leases.permits(child.agent_id, Permission.FILESYSTEM_READ.value, "mission:read")
+    asyncio.run(scenario())
