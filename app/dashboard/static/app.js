@@ -19,6 +19,7 @@ const empty = label => `<div class="empty"><strong>No ${esc(label)}</strong><spa
 
 const viewMeta = {
   overview: ['System overview', 'Live operational state from the authoritative runtime.'],
+  voice: ['Voice center', 'Live AssemblyAI input state, finalized commands, and runtime outcomes.'],
   missions: ['Mission center', 'Long-running objectives, progress, and controlled lifecycle actions.'],
   missionDetail: ['Mission detail', 'Objective, policy, task graph, agents, and correlated execution history.'],
   tasks: ['Task center', 'Verified work derived from active and historical mission graphs.'],
@@ -64,6 +65,13 @@ function overview() {
   const activity = events.slice(-9).reverse().map(event => `<div class="row"><div><b>${esc(event.event_type.replaceAll('_', ' '))}</b><br><small>${esc(event.mission_id || 'System')} · ${esc(event.payload?.command || event.payload?.error || event.status || 'Runtime event')}</small></div><time>${formatTime(event.timestamp)}</time></div>`).join('') || empty('events');
   const components = health.slice(0, 9).map(item => `<div class="row"><span>${esc(item.component.replaceAll('_', ' '))}</span>${status(item.status)}</div>`).join('');
   return `<div class="cards">${cards}</div><div class="grid"><section class="panel"><div class="panel-header"><h2>Live activity</h2><small>${events.length} retained events</small></div><div class="timeline">${activity}</div></section><section class="panel"><div class="panel-header"><h2>Component health</h2><small>Last snapshot</small></div>${components}</section></div>`;
+}
+
+function voice() {
+  const voice = state.data.voice;
+  const commands = voice.history || [];
+  const confidence = commands.length ? commands.reduce((sum, item) => sum + Number(item.confidence || 0), 0) / commands.length : null;
+  return `<div class="cards"><article class="card accent"><span>VOICE STATUS</span><strong>${esc(voice.status).toUpperCase()}</strong><small>${esc(voice.mode || 'Not configured')}</small></article><article class="card"><span>ASSEMBLYAI</span><strong>${esc(voice.connection).toUpperCase()}</strong><small>${esc(voice.model || 'No model')}</small></article><article class="card"><span>VOICE COMMANDS</span><strong>${commands.length}</strong><small>Bounded current session</small></article><article class="card"><span>AVG CONFIDENCE</span><strong>${confidence == null ? 'N/A' : Math.round(confidence * 100) + '%'}</strong><small>Finalized turns only</small></article></div><div class="grid"><section class="panel transcript-panel"><div class="panel-header"><h2>Live transcript</h2>${status(voice.status)}</div><p class="partial">${esc(voice.current_transcript || 'Waiting for speech…')}</p><p class="final">${voice.final_transcript ? '✓ ' + esc(voice.final_transcript) : 'No finalized turn'}</p><dl><dt>Session</dt><dd><code>${shortId(voice.session_id)}</code></dd><dt>Microphone</dt><dd>${esc(voice.microphone)}</dd><dt>Sample rate</dt><dd>${voice.sample_rate ? voice.sample_rate + ' Hz PCM16 mono' : '—'}</dd><dt>Active mission</dt><dd><code>${shortId(voice.active_mission)}</code></dd></dl>${voice.error ? `<p class="voice-error">${esc(voice.error)}</p>` : ''}</section><section class="panel"><h2>Privacy boundary</h2><p class="muted">Partial turns update ephemeral session state only. Final turns enter structured intent processing. Raw audio is never stored. Transcript persistence is disabled by default.</p><p class="muted">Speech confidence does not grant action authority. Every accepted mission still passes through the governor, policy, permissions, tools, observation, and verification.</p></section></div><section style="margin-top:13px">${table(['Time', 'Transcript', 'Intent', 'Mission', 'Status', 'Confidence', 'Result'], commands.slice().reverse().map(item => `<tr><td>${formatTime(item.timestamp)}</td><td>${esc(item.transcript || '[NOT STORED]')}</td><td>${status(item.intent)}</td><td><code>${shortId(item.mission_id)}</code></td><td>${status(item.status)}</td><td>${Math.round(Number(item.confidence || 0) * 100)}%</td><td>${esc(item.result)}</td></tr>`), 'voice commands')}</section>`;
 }
 
 function missions() {
@@ -133,7 +141,7 @@ function skills() { return table(['Skill', 'Status', 'Capabilities', 'Permission
 function inventory() { return table(['Registry', 'Authoritative values'], Object.entries(state.data.inventory).map(([key, value]) => `<tr><td><b>${esc(key.replaceAll('_', ' '))}</b></td><td>${esc(JSON.stringify(value))}</td></tr>`), 'inventory entries'); }
 function analytics() { return `<div class="cards">${Object.entries(state.data.analytics).map(([key, value]) => `<article class="card"><span>${esc(key.replaceAll('_', ' ').toUpperCase())}</span><strong>${value == null ? 'N/A' : key.includes('rate') || key.includes('score') ? Math.round(value * 100) + '%' : Math.round(value)}</strong><small>${value == null ? 'Insufficient runtime data' : 'Observed outcomes only'}</small></article>`).join('')}</div><section class="panel" style="margin-top:13px"><h2>Metric integrity</h2><p class="muted">Rates use successful observed outcomes divided by corresponding real terminal runtime records. N/A means no valid denominator exists; the command center never invents a score.</p></section>`; }
 
-const views = {overview, missions, missionDetail, tasks, schedules, agents, hierarchy, actions, world, resources, approvals, recovery, security, leases, activity, memory, skills, analytics, inventory, health};
+const views = {overview, voice, missions, missionDetail, tasks, schedules, agents, hierarchy, actions, world, resources, approvals, recovery, security, leases, activity, memory, skills, analytics, inventory, health};
 
 function setConnection(mode, label) {
   $('#streamBadge').className = `connection ${mode}`;

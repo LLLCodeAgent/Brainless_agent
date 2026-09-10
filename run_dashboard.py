@@ -22,6 +22,9 @@ from app.dashboard.runtime_bridge import RuntimeEventBridge
 from app.safety.permissions import Permission
 from app.autonomy.operator import AutonomyMode
 from app.autonomy.health import AgentHealthMonitor
+from app.voice import AssemblyAIStreamingTransport, VoiceConfig, VoiceMode, VoiceService
+from app.voice.service import VoiceRuntimeRouter
+from app.voice.store import VoiceMetadataStore
 
 
 async def _pump(bridge: RuntimeEventBridge, health: AgentHealthMonitor) -> None:
@@ -67,10 +70,20 @@ async def serve() -> None:
             raise RuntimeError("No reasoning provider is configured")
     operator = AutonomousOperator(missions, PerceptionService(
         application.autonomous_actions.controller, application.autonomous_actions.world_state, events), events, runner)
+    voice = None
+    voice_task = None
+    if os.environ.get("ASSEMBLYAI_API_KEY"):
+        voice_config = VoiceConfig.from_env()
+        voice = VoiceService(voice_config, AssemblyAIStreamingTransport(voice_config),
+            VoiceRuntimeRouter(operator, missions, approvals), events,
+            VoiceMetadataStore(root / "data/voice-sessions.json"))
+        if voice_config.mode in {VoiceMode.ACTIVE, VoiceMode.SESSION}:
+            await voice.start()
+            voice_task = asyncio.create_task(voice.listen())
     runtime = DashboardRuntime(missions, events, operator, application.agent_manager,
         application.autonomous_actions, triggers=trigger_store, memory=application.memory,
         skills=application.skill_registry, provider_names=application.providers.names,
-        mission_execution_status=execution_status, approval_system=approvals)
+        mission_execution_status=execution_status, approval_system=approvals, voice=voice)
     gateway = RuntimeCommandGateway(runtime, token)
     server = DashboardServer(DashboardService(runtime), gateway, port=8765)
     bridge_task = asyncio.create_task(_pump(RuntimeEventBridge(
@@ -84,7 +97,10 @@ async def serve() -> None:
         await asyncio.Event().wait()
     finally:
         operator_task.cancel(); bridge_task.cancel(); trigger_task.cancel()
-        await asyncio.gather(operator_task, bridge_task, trigger_task, return_exceptions=True)
+        tasks = [operator_task, bridge_task, trigger_task]
+        if voice_task: voice_task.cancel(); tasks.append(voice_task)
+        if voice: await voice.stop()
+        await asyncio.gather(*tasks, return_exceptions=True)
         server.close(); event_store.close(); await application.close()
 
 

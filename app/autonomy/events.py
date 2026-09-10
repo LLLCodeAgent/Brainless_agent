@@ -17,6 +17,7 @@ class EventType(str, Enum):
     RESOURCE_AVAILABLE="resource_available"; RESOURCE_CONFLICT="resource_conflict"; APPROVAL_RECEIVED="approval_received"
     TIME_TRIGGERED="time_triggered"; MISSION_TRIGGERED="mission_triggered"; USER_TAKEOVER="user_takeover"
     AGENT_UPDATED="agent_updated"; ACTION_RECORDED="action_recorded"
+    VOICE_SESSION="voice_session"; VOICE_PARTIAL="voice_partial"; VOICE_TURN="voice_turn"; VOICE_COMMAND="voice_command"
 
 @dataclass(frozen=True, slots=True)
 class AutonomousEvent:

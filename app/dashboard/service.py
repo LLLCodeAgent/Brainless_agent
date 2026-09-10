@@ -44,6 +44,7 @@ class DashboardRuntime:
     provider_names: tuple[str, ...] = ()
     mission_execution_status: str = "healthy"
     approval_system: ApprovalSystem | None = None
+    voice: Any = None
 
 
 class RuntimeCommandGateway:
@@ -161,6 +162,9 @@ class DashboardService:
                         "mission_id": task_missions.get(item.task_id), "status": "active",
                         "granted_at": item.granted_at.isoformat(), "expires_at": item.expires_at.isoformat()}
                        for item in self.runtime.agents.leases.active()],
+            "voice": self.runtime.voice.snapshot() if self.runtime.voice else {
+                "status": "not_configured", "connection": "disconnected", "history": [],
+                "current_transcript": "", "final_transcript": "", "error": None},
         }
 
     def health(self) -> list[dict[str, str]]:
@@ -173,6 +177,7 @@ class DashboardService:
             "llm_provider": "healthy" if self.runtime.provider_names else "not_configured",
             "browser": "unknown", "computer_control": "healthy", "dashboard_api": "healthy",
             "knowledge_graph": "not_configured",
+            "voice": "healthy" if self.runtime.voice and self.runtime.voice.health_check() else "not_configured",
         }
         return [{"component": key, "status": value, "last_seen": now} for key, value in checks.items()]
 

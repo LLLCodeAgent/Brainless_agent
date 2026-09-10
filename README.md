@@ -86,6 +86,24 @@ The server binds to loopback by default. Put it behind an authenticated TLS reve
 
 Architecture: `Browser UI -> authenticated dashboard API -> runtime projections/command gateway -> mission/operator policy -> existing validated ActionRuntime`. Runtime events flow back via `AutonomousEventBus -> bounded replay -> SSE -> browser`.
 
+### Voice control with AssemblyAI Streaming v3
+
+Install dependencies, set `ASSEMBLYAI_API_KEY`, and select a bounded activation mode in `.env` or the process environment. Voice is disabled when the key is absent. The default `push_to_talk` mode does not open a microphone automatically; `voice_active` and `voice_session` start a microphone session with the Command Center. Audio is 16 kHz mono PCM16 and is streamed through the AssemblyAI Python SDK's v3 streaming client using `universal-3-5-pro` by default.
+
+```bash
+export ASSEMBLYAI_API_KEY="your-key"
+export VOICE_MODE="voice_session"
+BRAINLESS_DASHBOARD_TOKEN="replace-with-at-least-16-characters" python run_dashboard.py
+```
+
+The voice architecture is `Microphone -> AssemblyAI Streaming v3 -> VoiceTurn -> VoiceIntentEngine -> VoiceRuntimeRouter -> AutonomousOperator -> validated mission runtime`. Partial turns update ephemeral dashboard state but never execute. Only deduplicated finalized turns are classified. Ordinary multi-step speech becomes one mission goal for the existing planner; deterministic stop, pause, takeover, status, and approval phrases are routed to existing runtime services. AssemblyAI and the voice service have no ToolRegistry, permission-grant, controller, or WorldState write path.
+
+Speech confidence, intent classification, authorization, and verification are separate decisions. Low-confidence speech waits for repetition. Sensitive language waits for an explicit `yes` or `confirm`, after which the resulting mission still passes through the autonomy governor, approval policy, permissions, scheduler, tools, observation, and verification. A spoken `approve` or `deny` resolves an approval only when exactly one pending runtime approval exists; otherwise the user is directed to the dashboard.
+
+Raw audio is never persisted. Transcript persistence defaults off; durable records contain session/intent/result metadata and `[NOT STORED]` in persisted event transcripts. If enabled, transcript storage is bounded and recursively redacts credential-like content. Session duration, idle timeout, reconnect count, language, confidence thresholds, transcript retention behavior, and model are environment-configurable. Connections use bounded exponential backoff and are explicitly terminated during runtime shutdown. The Voice dashboard shows the ephemeral live transcript, last finalized turn, connection/session state, active mission, bounded command history, confidence, errors, and real session metrics.
+
+Troubleshooting: `not_configured` means no API key was supplied; `disconnected` indicates no active bounded session; microphone failures require an OS input device and the SDK's audio extras. Keep `VOICE_STORE_AUDIO=false`—the implementation rejects raw-audio persistence. For cost control, prefer push-to-talk or a bounded voice session instead of continuous mode.
+
 ## Installation
 
 Requires Python 3.11+ and an installed Google Chrome/Chrome-compatible browser.
