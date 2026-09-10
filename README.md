@@ -106,6 +106,40 @@ Troubleshooting: `not_configured` means no API key was supplied; `disconnected` 
 
 The Voice page also supports runtime-only credential setup: select **Configure AssemblyAI**, enter the key in the password field, and then hold **Hold to talk**. This authenticated command is handled by the same runtime gateway as other dashboard controls. The key is validated, passed through a write-only control plane, and retained only inside the in-memory AssemblyAI client configuration; snapshots, responses, SSE events, audit details, and the voice metadata store never contain it. Restarting the process clears a dashboard-supplied key. Use `ASSEMBLYAI_API_KEY` when durable deployment configuration is required, and use a TLS reverse proxy before accessing the dashboard remotely because the built-in server intentionally binds plain HTTP to loopback.
 
+### Multimodal perception architecture
+
+The runtime now has an on-demand `MultimodalPerceptionEngine` above the existing computer controller observation boundary:
+
+```text
+Voice / authenticated dashboard / agent request
+                    |
+             PerceptionRequest + capability scope
+                    |
+ Controller / accessibility / DOM / visual providers
+                    |
+        immutable PerceptionObservation records
+                    |
+             PerceptionFusionEngine
+                    |
+             EnvironmentSnapshot
+                    |
+       WorldStateManager + structural events
+                    |
+       semantic grounding -> proposed action
+                    |
+ governor -> policy -> permission -> tool -> execution
+                    |
+             observation -> verification
+```
+
+`PerceptionSource` is provider-independent. The production launcher currently installs `ComputerControllerSource`, which adapts the real active controller's read-only `observe()` method; accessibility, DOM, OCR, or visual-understanding adapters can be registered when their platform integration is available. Missing sources and screenshots are reported as unavailable rather than fabricated. The engine invokes only sources matching the request's perception capabilities, fuses structured observations, records observed application/window/browser/UI identifiers in the existing `WorldStateManager`, measures actual perception latency, and emits structural `environment_observed`, drift, and `human_required` events. Capture is active and on demand rather than an unconditional screenshot loop.
+
+`ScreenGroundingEngine` resolves text, roles, ordinals, and spatial relationships against `UIElement` records. Accessibility and DOM evidence outrank application, OCR, visual, and controller-text evidence. A coordinate is derived only from the selected semantic element's current bounds; an unresolved or equally ranked ambiguous target fails closed. Existing `TargetResolver.resolve()` remains backward compatible, while `resolve_environment()` uses normalized multimodal state.
+
+Observed webpage, DOM, OCR, voice-context, and screenshot content is always labelled **untrusted observation data**. `MultimodalCommand` rejects screen-originated executable intent, and `ContextBuilder` sends only bounded relevant elements and history. Perception providers have no execution method, tool registry, permission mutation, or agent factory. Shared redaction removes credential-bearing keys and values from dashboard projections, events, and durable voice metadata. CAPTCHA, MFA, security-key, biometric, identity, and payment-confirmation indicators emit `human_required` and enter user-takeover mode; no bypass is attempted.
+
+The dashboard **Perception** page provides an authenticated **Observe now** control, real source/latency/confidence counts, active application/window/browser state, structured UI elements, and the `OBSERVE → UNDERSTAND → TARGET → ACTION → OBSERVE → VERIFY` trace. The browser receives projections only and cannot capture a screen or invoke a controller directly.
+
 ## Installation
 
 Requires Python 3.11+ and an installed Google Chrome/Chrome-compatible browser.

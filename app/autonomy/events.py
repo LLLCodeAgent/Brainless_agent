@@ -18,6 +18,9 @@ class EventType(str, Enum):
     TIME_TRIGGERED="time_triggered"; MISSION_TRIGGERED="mission_triggered"; USER_TAKEOVER="user_takeover"
     AGENT_UPDATED="agent_updated"; ACTION_RECORDED="action_recorded"
     VOICE_SESSION="voice_session"; VOICE_PARTIAL="voice_partial"; VOICE_TURN="voice_turn"; VOICE_COMMAND="voice_command"
+    ENVIRONMENT_OBSERVED="environment_observed"; ENVIRONMENT_DRIFT="environment_drift"
+    UI_DETECTED="ui_detected"; TARGET_RESOLVED="target_resolved"; TARGET_RESOLUTION_FAILED="target_resolution_failed"
+    HUMAN_REQUIRED="human_required"
 
 @dataclass(frozen=True, slots=True)
 class AutonomousEvent:

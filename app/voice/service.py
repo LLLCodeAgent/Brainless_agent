@@ -63,6 +63,10 @@ class AssemblyAIStreamingTransport:
     def health_check(self) -> bool: return self._connected
 
 
+class AssemblyAISpeechProvider(AssemblyAIStreamingTransport):
+    """Named provider implementation; the legacy transport name remains compatible."""
+
+
 class VoiceRuntimeRouter:
     """Maps structured voice intent only into existing runtime-owned services."""
     def __init__(self, operator, missions, approvals=None,

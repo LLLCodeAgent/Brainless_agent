@@ -14,6 +14,8 @@ from app.autonomy.mission import Mission, MissionStatus, MissionStore
 from app.autonomy.operator import AutonomousOperator
 from app.autonomy.triggers import TriggerStore
 from app.autonomy.approvals import ApprovalStatus, ApprovalSystem
+from app.perception.engine import PerceptionRequest
+from app.safety.redaction import redact
 
 
 class DashboardAuthorizationError(PermissionError):
@@ -32,6 +34,7 @@ class DashboardCommand(str, Enum):
     CONFIGURE_VOICE = "configure_voice"
     START_VOICE = "start_voice"
     STOP_VOICE = "stop_voice"
+    OBSERVE_ENVIRONMENT = "observe_environment"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,7 @@ class DashboardRuntime:
     mission_execution_status: str = "healthy"
     approval_system: ApprovalSystem | None = None
     voice: Any = None
+    perception: Any = None
 
 
 class RuntimeCommandGateway:
@@ -122,6 +126,11 @@ class RuntimeCommandGateway:
         elif requested is DashboardCommand.STOP_VOICE:
             if self.runtime.voice is None: raise ValueError("Voice control is unavailable")
             await self.runtime.voice.stop()
+        elif requested is DashboardCommand.OBSERVE_ENVIRONMENT:
+            if self.runtime.perception is None: raise ValueError("Multimodal perception is unavailable")
+            await self.runtime.perception.observe(PerceptionRequest(
+                frozenset({"screen.read", "window.read", "browser.read", "process.read"}),
+                "Authenticated dashboard observation", mission_id or None))
         correlation_id = str(uuid4())
         event_type = EventType.APPROVAL_RECEIVED if requested in {
             DashboardCommand.APPROVE, DashboardCommand.DENY} else EventType.USER_MESSAGE
@@ -177,9 +186,12 @@ class DashboardService:
                         "mission_id": task_missions.get(item.task_id), "status": "active",
                         "granted_at": item.granted_at.isoformat(), "expires_at": item.expires_at.isoformat()}
                        for item in self.runtime.agents.leases.active()],
-            "voice": self.runtime.voice.snapshot() if self.runtime.voice else {
+            "voice": redact(self.runtime.voice.snapshot()) if self.runtime.voice else {
                 "status": "not_configured", "connection": "disconnected", "history": [],
                 "current_transcript": "", "final_transcript": "", "error": None},
+            "perception": redact(self.runtime.perception.snapshot()) if self.runtime.perception else {
+                "status": "not_configured", "observations": 0, "average_latency_ms": None,
+                "elements": [], "sources": []},
         }
 
     def health(self) -> list[dict[str, str]]:
@@ -193,6 +205,7 @@ class DashboardService:
             "browser": "unknown", "computer_control": "healthy", "dashboard_api": "healthy",
             "knowledge_graph": "not_configured",
             "voice": "healthy" if self.runtime.voice and self.runtime.voice.health_check() else "not_configured",
+            "multimodal_perception": "healthy" if self.runtime.perception else "not_configured",
         }
         return [{"component": key, "status": value, "last_seen": now} for key, value in checks.items()]
 
@@ -328,12 +341,7 @@ class DashboardService:
 
 
 def _redact(value: Any) -> Any:
-    sensitive = ("password", "secret", "token", "api_key", "authorization", "cookie", "credential")
-    if isinstance(value, dict):
-        return {str(key): "[REDACTED]" if any(term in str(key).casefold() for term in sensitive) else _redact(item)
-                for key, item in value.items()}
-    if isinstance(value, (list, tuple)): return [_redact(item) for item in value]
-    return value
+    return redact(value)
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:

@@ -44,3 +44,9 @@ class TargetResolver:
         # whenever their confidence is comparable.
         priority = {"accessibility": 5, "dom": 4, "text": 3, "visual": 2, "coordinates": 1}
         return max(eligible, key=lambda item: (item.confidence, priority.get(item.method, 0)), default=None)
+
+    def resolve_environment(self, query: str, snapshot, *, minimum_confidence: float | None = None) -> ResolvedTarget | None:
+        """Resolve normalized UI semantically; kept separate from legacy ComputerState callers."""
+        from app.perception.grounding import ScreenGroundingEngine
+        return ScreenGroundingEngine().resolve(query, snapshot,
+            minimum_confidence=self.confidence_threshold if minimum_confidence is None else minimum_confidence)

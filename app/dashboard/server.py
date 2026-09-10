@@ -50,6 +50,7 @@ class DashboardServer:
                 if parsed.path == "/api/health": return self._json(HTTPStatus.OK, service.health())
                 if parsed.path == "/api/events": return self._json(HTTPStatus.OK, service.events(since=int(query.get("since",[0])[0])))
                 if parsed.path == "/api/search": return self._json(HTTPStatus.OK, service.search(query.get("q",[""])[0]))
+                if parsed.path == "/api/perception/screenshot": return self._screenshot()
                 projections={"/api/missions":"missions","/api/tasks":"tasks","/api/agents":"agents",
                     "/api/schedules":"schedules","/api/actions":"actions","/api/approvals":"approvals",
                     "/api/resources":"resources","/api/world":"world","/api/system/inventory":"inventory",
@@ -90,6 +91,21 @@ class DashboardServer:
             def _json(self,status,payload):
                 body=json.dumps(payload,default=str).encode(); self.send_response(status); self._security_headers()
                 self.send_header("Content-Type","application/json"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+            def _screenshot(self):
+                perception = service.runtime.perception
+                reference = perception.latest.screenshot_reference if perception and perception.latest else None
+                path = Path(reference).resolve() if reference else None
+                if not path or not path.is_file() or path.suffix.casefold() not in {".png", ".jpg", ".jpeg"}:
+                    return self._json(HTTPStatus.NOT_FOUND, {"error":"screenshot_unavailable"})
+                roots = tuple((Path.cwd() / name).resolve() for name in ("screenshots", "data"))
+                if not any(path == root or root in path.parents for root in roots):
+                    return self._json(HTTPStatus.FORBIDDEN, {"error":"screenshot_not_permitted"})
+                if path.stat().st_size > 5_000_000:
+                    return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error":"screenshot_too_large"})
+                body = path.read_bytes(); self.send_response(HTTPStatus.OK); self._security_headers()
+                self.send_header("Content-Type", "image/png" if path.suffix.casefold() == ".png" else "image/jpeg")
+                self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body)
             def _security_headers(self):
                 self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
                 self.send_header("X-Content-Type-Options", "nosniff")

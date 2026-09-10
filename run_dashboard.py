@@ -22,9 +22,10 @@ from app.dashboard.runtime_bridge import RuntimeEventBridge
 from app.safety.permissions import Permission
 from app.autonomy.operator import AutonomyMode
 from app.autonomy.health import AgentHealthMonitor
-from app.voice import AssemblyAIStreamingTransport, VoiceConfig, VoiceControlPlane, VoiceMode, VoiceService
+from app.voice import AssemblyAISpeechProvider, VoiceConfig, VoiceControlPlane, VoiceMode, VoiceService
 from app.voice.service import VoiceRuntimeRouter
 from app.voice.store import VoiceMetadataStore
+from app.perception import ComputerControllerSource, FilesystemPerceptionSource, MultimodalPerceptionEngine
 
 
 async def _pump(bridge: RuntimeEventBridge, health: AgentHealthMonitor) -> None:
@@ -71,11 +72,15 @@ async def serve() -> None:
     operator = AutonomousOperator(missions, PerceptionService(
         application.autonomous_actions.controller, application.autonomous_actions.world_state, events), events, runner)
     def create_voice(config: VoiceConfig) -> VoiceService:
-        return VoiceService(config, AssemblyAIStreamingTransport(config),
+        return VoiceService(config, AssemblyAISpeechProvider(config),
             VoiceRuntimeRouter(operator, missions, approvals), events,
             VoiceMetadataStore(root / "data/voice-sessions.json"))
 
     voice = VoiceControlPlane(create_voice)
+    multimodal_perception = MultimodalPerceptionEngine((ComputerControllerSource(
+        application.autonomous_actions.controller), FilesystemPerceptionSource(root)), events,
+        world=application.autonomous_actions.world_state)
+    multimodal_perception.on_human_required = lambda _: operator.takeover.begin()
     if os.environ.get("ASSEMBLYAI_API_KEY"):
         voice_config = VoiceConfig.from_env()
         voice.configure_config(voice_config)
@@ -84,7 +89,8 @@ async def serve() -> None:
     runtime = DashboardRuntime(missions, events, operator, application.agent_manager,
         application.autonomous_actions, triggers=trigger_store, memory=application.memory,
         skills=application.skill_registry, provider_names=application.providers.names,
-        mission_execution_status=execution_status, approval_system=approvals, voice=voice)
+        mission_execution_status=execution_status, approval_system=approvals, voice=voice,
+        perception=multimodal_perception)
     gateway = RuntimeCommandGateway(runtime, token)
     server = DashboardServer(DashboardService(runtime), gateway, port=8765,
         event_loop=asyncio.get_running_loop())

@@ -20,6 +20,7 @@ const empty = label => `<div class="empty"><strong>No ${esc(label)}</strong><spa
 const viewMeta = {
   overview: ['System overview', 'Live operational state from the authoritative runtime.'],
   voice: ['Voice center', 'Live AssemblyAI input state, finalized commands, and runtime outcomes.'],
+  perception: ['Visual perception', 'On-demand fused observations from runtime-authorized perception sources.'],
   missions: ['Mission center', 'Long-running objectives, progress, and controlled lifecycle actions.'],
   missionDetail: ['Mission detail', 'Objective, policy, task graph, agents, and correlated execution history.'],
   tasks: ['Task center', 'Verified work derived from active and historical mission graphs.'],
@@ -72,6 +73,15 @@ function voice() {
   const commands = voice.history || [];
   const confidence = commands.length ? commands.reduce((sum, item) => sum + Number(item.confidence || 0), 0) / commands.length : null;
   return `<div class="voice-toolbar"><button class="button" data-voice-configure>Configure AssemblyAI</button><button class="button button-primary push-to-talk" data-voice-talk ${voice.configured ? '' : 'disabled'}>Hold to talk</button><button class="button" data-command="stop_voice">Stop voice</button><small>Push-to-talk starts on press and stops on release.</small></div><div class="cards"><article class="card accent"><span>VOICE STATUS</span><strong>${esc(voice.status).toUpperCase()}</strong><small>${esc(voice.mode || 'Not configured')}</small></article><article class="card"><span>ASSEMBLYAI</span><strong>${esc(voice.connection).toUpperCase()}</strong><small>${esc(voice.model || 'No model')}</small></article><article class="card"><span>VOICE COMMANDS</span><strong>${commands.length}</strong><small>Bounded current session</small></article><article class="card"><span>AVG CONFIDENCE</span><strong>${confidence == null ? 'N/A' : Math.round(confidence * 100) + '%'}</strong><small>Finalized turns only</small></article></div><div class="grid"><section class="panel transcript-panel"><div class="panel-header"><h2>Live transcript</h2>${status(voice.status)}</div><p class="partial">${esc(voice.current_transcript || 'Waiting for speech…')}</p><p class="final">${voice.final_transcript ? '✓ ' + esc(voice.final_transcript) : 'No finalized turn'}</p><dl><dt>Session</dt><dd><code>${shortId(voice.session_id)}</code></dd><dt>Microphone</dt><dd>${esc(voice.microphone)}</dd><dt>Sample rate</dt><dd>${voice.sample_rate ? voice.sample_rate + ' Hz PCM16 mono' : '—'}</dd><dt>Active mission</dt><dd><code>${shortId(voice.active_mission)}</code></dd></dl>${voice.error ? `<p class="voice-error">${esc(voice.error)}</p>` : ''}</section><section class="panel"><h2>Privacy boundary</h2><p class="muted">Partial turns update ephemeral session state only. Final turns enter structured intent processing. Raw audio is never stored. Transcript persistence is disabled by default.</p><p class="muted">Speech confidence does not grant action authority. Every accepted mission still passes through the governor, policy, permissions, tools, observation, and verification.</p></section></div><section style="margin-top:13px">${table(['Time', 'Transcript', 'Intent', 'Mission', 'Status', 'Confidence', 'Result'], commands.slice().reverse().map(item => `<tr><td>${formatTime(item.timestamp)}</td><td>${esc(item.transcript || '[NOT STORED]')}</td><td>${status(item.intent)}</td><td><code>${shortId(item.mission_id)}</code></td><td>${status(item.status)}</td><td>${Math.round(Number(item.confidence || 0) * 100)}%</td><td>${esc(item.result)}</td></tr>`), 'voice commands')}</section>`;
+}
+
+function perception() {
+  const view = state.data.perception;
+  const latency = view.average_latency_ms == null ? 'N/A' : `${Math.round(view.average_latency_ms)} ms`;
+  const sourceNames = (view.sources || []).map(item => item.source).join(', ') || 'No observation yet';
+  const flow = ['OBSERVE', 'UNDERSTAND', 'TARGET', 'ACTION', 'OBSERVE', 'VERIFY']
+    .map((step, index) => `<span>${esc(step)}</span>${index < 5 ? '<i>→</i>' : ''}`).join('');
+  return `<div class="perception-toolbar"><button class="button button-primary" data-command="observe_environment">Observe now</button><small>Capture is requested through the runtime; this page has no direct screen access.</small></div><div class="cards"><article class="card accent"><span>PERCEPTION</span><strong>${esc(view.status).toUpperCase()}</strong><small>${view.observations} authorized observations</small></article><article class="card"><span>CONFIDENCE</span><strong>${view.confidence == null ? 'N/A' : Math.round(view.confidence * 100) + '%'}</strong><small>Fused source confidence</small></article><article class="card"><span>UI ELEMENTS</span><strong>${view.elements.length}</strong><small>Visible structured elements</small></article><article class="card"><span>AVG LATENCY</span><strong>${latency}</strong><small>Observed runtime measurements</small></article></div><div class="perception-flow">${flow}</div><div class="grid"><section class="panel"><div class="panel-header"><h2>Environment</h2>${status(view.status)}</div><dl class="environment-list"><dt>Application</dt><dd>${esc(view.active_application)}</dd><dt>Window</dt><dd>${esc(view.active_window)}</dd><dt>Browser URL</dt><dd>${esc(view.browser?.url)}</dd><dt>Observed</dt><dd>${formatDate(view.timestamp)}</dd><dt>Sources</dt><dd>${esc(sourceNames)}</dd><dt>Screenshot</dt><dd>${view.screenshot_reference ? 'AVAILABLE' : 'UNAVAILABLE'}</dd></dl>${view.screenshot_reference ? '<div class="screen-preview"><span>Loading authorized capture…</span></div>' : ''}</section><section class="panel"><h2>Trust boundary</h2><p class="muted">DOM, accessibility, OCR, screenshots, and webpage text are untrusted observation data. They cannot create commands, grant permissions, mutate policy, or execute tools.</p><p class="muted">A screenshot is shown only when an existing authorized perception source provides a safe reference. No independent dashboard capture path exists.</p></section></div><section style="margin-top:13px">${table(['Role', 'Label / text', 'Source', 'Confidence', 'Bounds', 'State'], view.elements.map(item => `<tr><td>${status(item.role)}</td><td><b>${esc(item.label || item.text)}</b></td><td>${esc(item.source)}</td><td>${Math.round(item.confidence * 100)}%</td><td><code>${esc(item.bounds ? item.bounds.join(', ') : 'semantic')}</code></td><td>${item.clickable ? 'Clickable' : item.editable ? 'Editable' : 'Read only'}</td></tr>`), 'UI elements')}</section>`;
 }
 
 function missions() {
@@ -141,7 +151,7 @@ function skills() { return table(['Skill', 'Status', 'Capabilities', 'Permission
 function inventory() { return table(['Registry', 'Authoritative values'], Object.entries(state.data.inventory).map(([key, value]) => `<tr><td><b>${esc(key.replaceAll('_', ' '))}</b></td><td>${esc(JSON.stringify(value))}</td></tr>`), 'inventory entries'); }
 function analytics() { return `<div class="cards">${Object.entries(state.data.analytics).map(([key, value]) => `<article class="card"><span>${esc(key.replaceAll('_', ' ').toUpperCase())}</span><strong>${value == null ? 'N/A' : key.includes('rate') || key.includes('score') ? Math.round(value * 100) + '%' : Math.round(value)}</strong><small>${value == null ? 'Insufficient runtime data' : 'Observed outcomes only'}</small></article>`).join('')}</div><section class="panel" style="margin-top:13px"><h2>Metric integrity</h2><p class="muted">Rates use successful observed outcomes divided by corresponding real terminal runtime records. N/A means no valid denominator exists; the command center never invents a score.</p></section>`; }
 
-const views = {overview, voice, missions, missionDetail, tasks, schedules, agents, hierarchy, actions, world, resources, approvals, recovery, security, leases, activity, memory, skills, analytics, inventory, health};
+const views = {overview, voice, perception, missions, missionDetail, tasks, schedules, agents, hierarchy, actions, world, resources, approvals, recovery, security, leases, activity, memory, skills, analytics, inventory, health};
 
 function setConnection(mode, label) {
   $('#streamBadge').className = `connection ${mode}`;
@@ -163,6 +173,21 @@ function render() {
   $('#takeover').textContent = state.data.takeover_mode === 'takeover' ? 'Return control' : 'Take control';
   document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === state.view));
   setConnection('online', 'Runtime online');
+  if (state.view === 'perception' && state.data.perception.screenshot_reference) loadPerceptionScreenshot();
+}
+
+async function loadPerceptionScreenshot() {
+  const preview = $('.screen-preview');
+  if (!preview) return;
+  try {
+    const response = await fetch('/api/perception/screenshot', {headers: {Authorization: `Bearer ${state.token}`}});
+    if (!response.ok) throw new Error('Screenshot unavailable');
+    const blob = await response.blob();
+    const source = URL.createObjectURL(blob);
+    preview.innerHTML = `<img alt="Latest runtime-authorized screen observation">`;
+    preview.querySelector('img').src = source;
+    preview.querySelector('img').addEventListener('load', () => URL.revokeObjectURL(source), {once: true});
+  } catch (_) { preview.innerHTML = '<span>Screenshot unavailable or not permitted</span>'; }
 }
 
 function toast(message, type = '') {
