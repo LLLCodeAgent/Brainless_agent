@@ -57,6 +57,25 @@ Agent events record task, status, result, error, tool, and permission-denied out
 
 The runtime observes after navigation and before sending input. Provider adapters use DOM/accessibility locators instead of fixed screen coordinates. If a login, CAPTCHA, 2FA, or another security challenge is detected, the run stops and tells the user to complete it manually. The project never captures passwords, exports cookies, or attempts to bypass a security mechanism.
 
+
+## Web Command Center
+
+Run the authenticated, read-mostly operations dashboard with a local token:
+
+```bash
+BRAINLESS_DASHBOARD_TOKEN="replace-with-at-least-16-characters" python run_dashboard.py
+```
+
+Open `http://127.0.0.1:8765` and enter the same token. The responsive dark dashboard renders authoritative mission, task, agent, action, resource, event, world-model, inventory, approval, and component-health projections. It uses authenticated JSON endpoints (`/api/system`, `/api/health`, `/api/events`, `/api/search`), an SSE replay stream (`/api/stream`), and an authenticated command endpoint (`/api/commands`). It never imports or invokes computer tools. Commands are allow-listed by `RuntimeCommandGateway`, authorized with constant-time token comparison, applied to runtime-owned mission/takeover services, and emitted back as correlated events.
+
+The dashboard event bus retains a bounded 2,000-event in-memory replay window with monotonically increasing sequence IDs and backpressure, backed by retained SQLite event history. Mission, task, agent, action, and trigger history comes from existing durable stores; unsupported health integrations are shown as `unknown` or `not_configured`, never synthesized. On reconnect, the client fetches a fresh authoritative snapshot before requesting events after its last sequence. The standalone dashboard starts mission execution as `not_configured`; embedding applications should supply the existing `TaskEngineMissionRunner` to execute persisted mission graphs through `AutonomousTaskEngine`.
+
+### Dashboard security and deployment
+
+The server binds to loopback by default. Put it behind an authenticated TLS reverse proxy for remote access and rotate `BRAINLESS_DASHBOARD_TOKEN` operationally. Read endpoints and SSE require the token; mutation requests are schema-limited, size-bounded, authenticated, and routed through the runtime command gateway. Sensitive argument and state keys are recursively redacted. The dashboard cannot grant permissions, execute tools, write WorldState, or contact a reasoning provider.
+
+Architecture: `Browser UI -> authenticated dashboard API -> runtime projections/command gateway -> mission/operator policy -> existing validated ActionRuntime`. Runtime events flow back via `AutonomousEventBus -> bounded replay -> SSE -> browser`.
+
 ## Installation
 
 Requires Python 3.11+ and an installed Google Chrome/Chrome-compatible browser.

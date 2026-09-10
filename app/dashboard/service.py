@@ -1,0 +1,229 @@
+"""Read-only dashboard projections and authorized runtime command gateway."""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from enum import Enum
+import hmac
+from typing import Any
+from uuid import uuid4
+
+from app.agents.models import AgentStatus
+from app.autonomy.events import AutonomousEvent, AutonomousEventBus, EventType
+from app.autonomy.mission import Mission, MissionStatus, MissionStore
+from app.autonomy.operator import AutonomousOperator
+from app.autonomy.triggers import TriggerStore
+
+
+class DashboardAuthorizationError(PermissionError):
+    pass
+
+
+class DashboardCommand(str, Enum):
+    CREATE_MISSION = "create_mission"
+    PAUSE_MISSION = "pause_mission"
+    RESUME_MISSION = "resume_mission"
+    CANCEL_MISSION = "cancel_mission"
+    TAKE_OVER = "take_over"
+    RELEASE_TAKEOVER = "release_takeover"
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardRuntime:
+    missions: MissionStore
+    events: AutonomousEventBus
+    operator: AutonomousOperator
+    agents: Any
+    actions: Any
+    triggers: TriggerStore | None = None
+    memory: Any = None
+    skills: Any = None
+    provider_names: tuple[str, ...] = ()
+    mission_execution_status: str = "healthy"
+
+
+class RuntimeCommandGateway:
+    """The only dashboard mutation path; commands are authenticated and allow-listed."""
+    def __init__(self, runtime: DashboardRuntime, token: str) -> None:
+        if len(token) < 16:
+            raise ValueError("Dashboard token must contain at least 16 characters")
+        self.runtime, self._token = runtime, token
+
+    def authorized(self, token: str) -> bool:
+        return hmac.compare_digest(token, self._token)
+
+    async def execute(self, token: str, command: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.authorized(token):
+            raise DashboardAuthorizationError("Dashboard command is not authorized")
+        try:
+            requested = DashboardCommand(command)
+        except ValueError as error:
+            raise ValueError("Unsupported dashboard command") from error
+        mission_id = str(payload.get("mission_id", ""))
+        if requested is DashboardCommand.CREATE_MISSION:
+            goal = str(payload.get("goal", "")).strip()
+            owner = str(payload.get("owner", "user")).strip()
+            if not goal or len(goal) > 4_000 or not owner or len(owner) > 200:
+                raise ValueError("Mission goal and owner are required and bounded")
+            priority = int(payload.get("priority", 0))
+            if not -100 <= priority <= 100:
+                raise ValueError("Mission priority must be between -100 and 100")
+            mission = Mission(goal, owner, priority=priority)
+            await self.runtime.operator.create(mission)
+            mission_id = mission.mission_id
+        elif requested in {DashboardCommand.PAUSE_MISSION, DashboardCommand.RESUME_MISSION,
+                         DashboardCommand.CANCEL_MISSION}:
+            mission = self.runtime.missions.load(mission_id)
+            if mission is None:
+                raise KeyError(f"Unknown mission: {mission_id}")
+            terminal = {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED}
+            if mission.status in terminal:
+                raise ValueError("Terminal missions cannot be changed by dashboard commands")
+            if requested is DashboardCommand.RESUME_MISSION and mission.status not in {
+                    MissionStatus.PAUSED, MissionStatus.WAITING, MissionStatus.BLOCKED,
+                    MissionStatus.AWAITING_USER, MissionStatus.RECOVERING}:
+                raise ValueError("Mission is not in a resumable state")
+            transitions = {
+                DashboardCommand.PAUSE_MISSION: MissionStatus.PAUSED,
+                DashboardCommand.RESUME_MISSION: MissionStatus.WAITING,
+                DashboardCommand.CANCEL_MISSION: MissionStatus.CANCELLED,
+            }
+            mission.status = transitions[requested]
+            mission.touch()
+            self.runtime.missions.save(mission)
+        elif requested is DashboardCommand.TAKE_OVER:
+            self.runtime.operator.takeover.begin()
+        elif requested is DashboardCommand.RELEASE_TAKEOVER:
+            self.runtime.operator.takeover.resume()
+        correlation_id = str(uuid4())
+        await self.runtime.events.publish(AutonomousEvent(
+            EventType.USER_MESSAGE, mission_id or None,
+            {"command": requested.value, "status": "accepted", "correlation_id": correlation_id},
+            correlation_id=correlation_id,
+        ))
+        return {"accepted": True, "command": requested.value, "correlation_id": correlation_id}
+
+
+class DashboardService:
+    """Creates secret-redacted DTOs from authoritative runtime components."""
+    def __init__(self, runtime: DashboardRuntime) -> None:
+        self.runtime = runtime
+
+    def snapshot(self) -> dict[str, Any]:
+        missions = [self._mission(item) for item in self.runtime.missions.all()]
+        agents = [self._agent(item) for item in self.runtime.agents.list_agents()]
+        actions = [self._action(item) for item in self.runtime.actions.audit]
+        schedules = [self._trigger(item) for item in self.runtime.triggers.all()] if self.runtime.triggers else []
+        tasks = [task for mission in missions for task in mission["tasks"]]
+        statuses = [mission["status"] for mission in missions]
+        pending_approvals = [action for action in actions if action["approval_status"] == "required"]
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "takeover_mode": self.runtime.operator.takeover.mode.value,
+            "overview": {
+                "active_missions": sum(status not in {"completed", "failed", "cancelled"} for status in statuses),
+                "active_tasks": sum(task["status"] == "running" for task in tasks),
+                "active_agents": sum(agent["status"] == AgentStatus.RUNNING.value for agent in agents),
+                "scheduled_tasks": sum(item["enabled"] for item in schedules),
+                "completed_tasks": sum(task["status"] == "completed" for task in tasks),
+                "failed_tasks": sum(task["status"] == "failed" for task in tasks),
+                "waiting_blocked": sum(status in {"waiting", "blocked", "awaiting_user"} for status in statuses),
+                "pending_approvals": len(pending_approvals),
+            },
+            "health": self.health(), "missions": missions, "tasks": tasks, "agents": agents,
+            "schedules": schedules, "events": self.events(), "actions": actions,
+            "approvals": pending_approvals, "resources": {"locks": self.runtime.actions.locks.owners,
+                "queue_depth": self.runtime.events.queue_depth, "agent_count": len(agents), "task_count": len(tasks)},
+            "world": self._world(), "inventory": self.inventory(),
+            "recovery": [event for event in self.events() if event["event_type"] in {"agent_failed", "task_failed"}],
+            "security": [action for action in actions if action["error"] or action["policy_decision"] != "auto_approve"],
+            "logs": self.events(),
+        }
+
+    def health(self) -> list[dict[str, str]]:
+        now = datetime.now(timezone.utc).isoformat()
+        checks = {
+            "runtime": "healthy", "event_bus": "healthy", "mission_store": "healthy",
+            "mission_execution": self.runtime.mission_execution_status,
+            "agent_manager": "healthy", "tool_registry": "healthy", "permission_policy": "healthy",
+            "world_model": "healthy", "persistence": "healthy",
+            "llm_provider": "healthy" if self.runtime.provider_names else "not_configured",
+            "browser": "unknown", "computer_control": "healthy", "dashboard_api": "healthy",
+            "knowledge_graph": "not_configured",
+        }
+        return [{"component": key, "status": value, "last_seen": now} for key, value in checks.items()]
+
+    def events(self, *, since: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        return [self._event(item) for item in self.runtime.events.replay(since, limit)]
+
+    def search(self, query: str) -> list[dict[str, Any]]:
+        needle = query.casefold().strip()
+        if not needle:
+            return []
+        snapshot = self.snapshot()
+        results = []
+        for category in ("missions", "tasks", "agents", "events", "actions", "schedules"):
+            for item in snapshot[category]:
+                if needle in str(item).casefold():
+                    results.append({"category": category, "item": item})
+        return results[:200]
+
+    def inventory(self) -> dict[str, Any]:
+        return {"tools": list(self.runtime.agents.tools.tool_ids),
+                "agents": len(self.runtime.agents.list_agents()),
+                "permissions": sorted({permission for agent in self.runtime.agents.list_agents() for permission in agent.permissions}),
+                "providers": list(self.runtime.provider_names)}
+
+    def _mission(self, mission: Mission) -> dict[str, Any]:
+        tasks = [{"task_id": task_id, "mission_id": mission.mission_id,
+                  "description": data.get("objective", task_id), **data}
+                 for task_id, data in mission.task_graph.items()]
+        return {"mission_id": mission.mission_id, "objective": mission.goal, "owner": mission.owner,
+                "status": mission.status.value, "priority": mission.priority, "deadline": mission.deadline,
+                "progress": dict(mission.progress), "constraints": list(mission.constraints),
+                "acceptance_criteria": list(mission.acceptance_criteria), "current_state": _redact(mission.current_state),
+                "checkpoint": _redact(mission.checkpoint), "created_at": mission.created_at,
+                "updated_at": mission.last_activity, "next_wakeup": mission.next_wakeup, "tasks": tasks}
+
+    @staticmethod
+    def _agent(agent) -> dict[str, Any]:
+        return {"agent_id": agent.agent_id, "name": agent.name, "role": agent.role,
+                "parent_agent_id": agent.parent_agent_id, "children": list(agent.child_agents),
+                "status": agent.status.value, "current_task": agent.current_task,
+                "task_id": agent.current_task_id, "permissions": sorted(agent.permissions),
+                "tools": sorted(agent.available_tools), "created_at": agent.created_at.isoformat(),
+                "last_action": agent.execution_history[-1].tool_id if agent.execution_history else None,
+                "health": "failed" if agent.status in {AgentStatus.FAILED, AgentStatus.TERMINATED} else "healthy"}
+
+    @staticmethod
+    def _action(record) -> dict[str, Any]:
+        data = asdict(record); data["timestamp"] = record.timestamp.isoformat()
+        data["arguments"] = _redact(data["arguments"]); return data
+
+    @staticmethod
+    def _event(event: AutonomousEvent) -> dict[str, Any]:
+        return {"sequence": event.sequence, "timestamp": event.timestamp.isoformat(), "event_type": event.type.value,
+                "mission_id": event.mission_id, "task_id": event.detail.get("task_id"),
+                "agent_id": event.detail.get("agent_id"), "status": event.detail.get("status"),
+                "severity": event.detail.get("severity", "info"), "correlation_id": event.correlation_id,
+                "payload": _redact(event.detail)}
+
+    @staticmethod
+    def _trigger(trigger) -> dict[str, Any]:
+        return {"schedule_id": trigger.trigger_id, "mission_id": trigger.mission_id,
+                "trigger": trigger.kind.value, "next_execution": trigger.value if trigger.kind.value == "time" else None,
+                "previous_execution": trigger.last_fired, "enabled": trigger.enabled}
+
+    def _world(self) -> list[dict[str, Any]]:
+        return [{"key": key, "value": _redact(fact.value), "kind": fact.kind.value,
+                 "confidence": fact.confidence, "source": fact.source, "timestamp": fact.timestamp.isoformat()}
+                for key, fact in self.runtime.actions.world_state.snapshot().facts.items()]
+
+
+def _redact(value: Any) -> Any:
+    sensitive = ("password", "secret", "token", "api_key", "authorization", "cookie", "credential")
+    if isinstance(value, dict):
+        return {str(key): "[REDACTED]" if any(term in str(key).casefold() for term in sensitive) else _redact(item)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)): return [_redact(item) for item in value]
+    return value

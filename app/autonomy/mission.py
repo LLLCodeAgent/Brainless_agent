@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 from typing import Any
+from threading import RLock
 
 
 class MissionStatus(str, Enum):
@@ -48,15 +49,18 @@ class Mission:
 
 class MissionStore:
     """Atomic local mission persistence, independent from any reasoning provider."""
-    def __init__(self, path: Path) -> None: self.path = path
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = RLock()
 
     def save(self, mission: Mission) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = asdict(mission); data["status"] = mission.status.value
-        all_missions = self._read(); all_missions[mission.mission_id] = data
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(all_missions, sort_keys=True, default=str), encoding="utf-8")
-        temporary.replace(self.path)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            data = asdict(mission); data["status"] = mission.status.value
+            all_missions = self._read(); all_missions[mission.mission_id] = data
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(all_missions, sort_keys=True, default=str), encoding="utf-8")
+            temporary.replace(self.path)
 
     def load(self, mission_id: str) -> Mission | None:
         data = self._read().get(mission_id)
@@ -66,8 +70,13 @@ class MissionStore:
         terminal = {MissionStatus.COMPLETED, MissionStatus.PARTIALLY_COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED}
         return tuple(mission for data in self._read().values() if (mission := _mission(data)).status not in terminal)
 
+    def all(self) -> tuple[Mission, ...]:
+        """Return persisted history, including terminal missions, for observability."""
+        return tuple(_mission(data) for data in self._read().values())
+
     def _read(self) -> dict[str, dict[str, Any]]:
-        return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
+        with self._lock:
+            return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
 
 def _mission(data: dict[str, Any]) -> Mission:

@@ -30,3 +30,4 @@ from app.autonomy.task_runner import TaskEngineMissionRunner
 from app.autonomy.triggers import FilesystemWatcher, ProcessWatcher, Trigger, TriggerEngine, TriggerKind, TriggerStore
 from app.autonomy.benchmark import BenchmarkHarness, BenchmarkResult
 from app.autonomy.monitoring import AutonomyMetrics, Interruption, InterruptionKind, InterruptionManager, UserPresenceDetector
+from app.autonomy.event_store import EventStore
