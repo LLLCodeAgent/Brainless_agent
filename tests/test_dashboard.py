@@ -59,7 +59,12 @@ def test_dashboard_http_api_auth_static_load_and_replay(tmp_path):
     server = DashboardServer(service, gateway); server.start()
     host, port = server.address; base = f"http://{host}:{port}"
     try:
-        assert b"Command Center" in urlopen(base + "/", timeout=2).read()
+        page = urlopen(base + "/", timeout=2)
+        body = page.read()
+        assert b"Command Center" in body
+        assert b"Missions" in body and b"aria-live" in body
+        assert page.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in page.headers["Content-Security-Policy"]
         with pytest.raises(HTTPError) as denied:
             urlopen(base + "/api/system", timeout=2)
         assert denied.value.code == 401

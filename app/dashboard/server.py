@@ -81,7 +81,15 @@ class DashboardServer:
                 supplied=self.headers.get("Authorization","").removeprefix("Bearer ")
                 return commands.authorized(supplied)
             def _file(self,name,content_type):
-                body=(_STATIC/name).read_bytes(); self.send_response(HTTPStatus.OK); self.send_header("Content-Type",content_type); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+                body=(_STATIC/name).read_bytes(); self.send_response(HTTPStatus.OK); self._security_headers()
+                self.send_header("Content-Type",content_type); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
             def _json(self,status,payload):
-                body=json.dumps(payload,default=str).encode(); self.send_response(status); self.send_header("Content-Type","application/json"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+                body=json.dumps(payload,default=str).encode(); self.send_response(status); self._security_headers()
+                self.send_header("Content-Type","application/json"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+            def _security_headers(self):
+                self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         return Handler
