@@ -21,6 +21,7 @@ class EventType(str, Enum):
     ENVIRONMENT_OBSERVED="environment_observed"; ENVIRONMENT_DRIFT="environment_drift"
     UI_DETECTED="ui_detected"; TARGET_RESOLVED="target_resolved"; TARGET_RESOLUTION_FAILED="target_resolution_failed"
     HUMAN_REQUIRED="human_required"
+    PERCEPTION_SOURCE_FAILED="perception_source_failed"
 
 @dataclass(frozen=True, slots=True)
 class AutonomousEvent:

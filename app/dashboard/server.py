@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from threading import Thread
 from urllib.parse import parse_qs, urlparse
@@ -72,16 +73,25 @@ class DashboardServer:
             def do_POST(self):
                 if not self._authorized(urlparse(self.path)): return self._json(HTTPStatus.UNAUTHORIZED,{"error":"unauthorized"})
                 if self.path != "/api/commands": return self._json(HTTPStatus.NOT_FOUND,{"error":"not_found"})
+                future = None
                 try:
                     length=int(self.headers.get("Content-Length","0"))
                     if length > 16_384: return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,{"error":"too_large"})
                     data=json.loads(self.rfile.read(length)); token=self.headers.get("Authorization","").removeprefix("Bearer ")
                     operation=commands.execute(token,str(data["command"]),dict(data.get("payload",{})))
-                    result=(asyncio.run_coroutine_threadsafe(operation,event_loop).result(timeout=30)
-                            if event_loop else asyncio.run(operation))
+                    if event_loop:
+                        future = asyncio.run_coroutine_threadsafe(operation, event_loop)
+                        result = future.result(timeout=30)
+                    else:
+                        result = asyncio.run(operation)
                     return self._json(HTTPStatus.ACCEPTED,result)
                 except DashboardAuthorizationError: return self._json(HTTPStatus.UNAUTHORIZED,{"error":"unauthorized"})
                 except (KeyError,ValueError,TypeError,json.JSONDecodeError) as error: return self._json(HTTPStatus.BAD_REQUEST,{"error":str(error)})
+                except FutureTimeoutError:
+                    if future: future.cancel()
+                    return self._json(HTTPStatus.GATEWAY_TIMEOUT,{"error":"runtime_command_timeout"})
+                except Exception:
+                    return self._json(HTTPStatus.INTERNAL_SERVER_ERROR,{"error":"runtime_command_failed"})
             def _authorized(self, parsed):
                 supplied=self.headers.get("Authorization","").removeprefix("Bearer ")
                 return commands.authorized(supplied)

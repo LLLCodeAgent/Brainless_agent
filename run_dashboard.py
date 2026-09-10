@@ -79,7 +79,8 @@ async def serve() -> None:
     voice = VoiceControlPlane(create_voice)
     multimodal_perception = MultimodalPerceptionEngine((ComputerControllerSource(
         application.autonomous_actions.controller), FilesystemPerceptionSource(root)), events,
-        world=application.autonomous_actions.world_state)
+        world=application.autonomous_actions.world_state,
+        capability_authorizer=lambda agent_id: set(application.agent_manager.get_agent(agent_id).permissions))
     multimodal_perception.on_human_required = lambda _: operator.takeover.begin()
     if os.environ.get("ASSEMBLYAI_API_KEY"):
         voice_config = VoiceConfig.from_env()

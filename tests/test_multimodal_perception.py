@@ -93,7 +93,7 @@ def test_active_engine_uses_authorized_controller_observation_and_updates_world(
         world = WorldStateManager()
         engine = MultimodalPerceptionEngine((ComputerControllerSource(Controller()),), events,
                                             world=world)
-        snapshot = await engine.observe(PerceptionRequest(frozenset({"screen.read"}), "verify"))
+        snapshot = await engine.observe(PerceptionRequest(frozenset({"screen.read", "window.read", "browser.read"}), "verify"))
         assert snapshot.active_application == "browser"
         assert world.get("active_application", require_observed=True).value == "browser"
         assert events.replay()[-1].type is EventType.ENVIRONMENT_OBSERVED
@@ -122,8 +122,10 @@ def test_dashboard_observation_uses_gateway_and_redacts_visible_secrets(tmp_path
         name = "accessibility"
         capabilities = frozenset({"screen.read"})
         async def observe(self):
-            return observation(UIElement("textbox", text="password is hunter2",
-                source="accessibility", confidence=1, element_id="secret"))
+            return PerceptionObservation("accessibility", "accessibility",
+                screenshot_reference="/private/runtime/screen.png",
+                elements=(UIElement("textbox", text="password is hunter2",
+                    source="accessibility", confidence=1, element_id="secret"),))
 
     async def scenario():
         _, _, missions, events, manager, actions, operator = runtime(tmp_path)
@@ -135,6 +137,8 @@ def test_dashboard_observation_uses_gateway_and_redacts_visible_secrets(tmp_path
         projected = DashboardService(dashboard_runtime).snapshot()["perception"]
         assert projected["observations"] == 1
         assert projected["elements"][0]["text"] == "[REDACTED]"
+        assert projected["screenshot_available"] is True
+        assert "screenshot_reference" not in projected
         with pytest.raises(PermissionError):
             await gateway.execute("incorrect-dashboard-token", "observe_environment", {})
     asyncio.run(scenario())
@@ -151,4 +155,45 @@ def test_filesystem_source_reports_real_bounded_metadata_changes(tmp_path):
         (tmp_path / "report.txt").unlink()
         third = await source.observe()
         assert third.filesystem_changes == ({"path": "report.txt", "change": "deleted"},)
+    asyncio.run(scenario())
+
+
+def test_agent_perception_requires_runtime_grant_and_scopes_extra_fields():
+    class Source:
+        name = "combined"
+        capabilities = frozenset({"screen.read", "browser.read"})
+        async def observe(self):
+            return observation(UIElement("button", "Continue", source="dom", confidence=1),
+                               url="https://private.example/")
+    async def scenario():
+        engine = MultimodalPerceptionEngine((Source(),), AutonomousEventBus(),
+            capability_authorizer=lambda agent_id: {"screen.read"} if agent_id == "screen-agent" else set())
+        snapshot = await engine.observe(PerceptionRequest(
+            frozenset({"screen.read"}), "inspect", agent_id="screen-agent"))
+        assert snapshot.visible_elements and snapshot.browser_state == {}
+        with pytest.raises(PermissionError, match="browser.read"):
+            await engine.observe(PerceptionRequest(
+                frozenset({"browser.read"}), "inspect", agent_id="screen-agent"))
+    asyncio.run(scenario())
+
+
+def test_perception_degrades_when_one_source_fails_without_leaking_error():
+    class Good:
+        name = "good"
+        capabilities = frozenset({"screen.read"})
+        async def observe(self):
+            return observation(UIElement("button", "Continue", confidence=1))
+    class Broken:
+        name = "broken"
+        capabilities = frozenset({"screen.read"})
+        async def observe(self):
+            raise ConnectionError("sensitive upstream detail")
+    async def scenario():
+        events = AutonomousEventBus()
+        engine = MultimodalPerceptionEngine((Good(), Broken()), events)
+        snapshot = await engine.observe(PerceptionRequest(frozenset({"screen.read"}), "verify"))
+        assert snapshot.visible_elements and engine.snapshot()["status"] == "degraded"
+        failure = next(event for event in events.replay()
+                       if event.type is EventType.PERCEPTION_SOURCE_FAILED)
+        assert failure.detail == {"source": "broken", "error": "ConnectionError"}
     asyncio.run(scenario())

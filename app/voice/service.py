@@ -56,9 +56,12 @@ class AssemblyAIStreamingTransport:
         await asyncio.to_thread(self.client.stream, microphone)
 
     async def disconnect(self) -> None:
-        if self.client is not None:
-            await asyncio.to_thread(self.client.disconnect, terminate=True)
-        self._connected = False
+        try:
+            if self.client is not None:
+                await asyncio.to_thread(self.client.disconnect, terminate=True)
+        finally:
+            self._connected = False
+            self.client = None
 
     def health_check(self) -> bool: return self._connected
 
@@ -70,8 +73,10 @@ class AssemblyAISpeechProvider(AssemblyAIStreamingTransport):
 class VoiceRuntimeRouter:
     """Maps structured voice intent only into existing runtime-owned services."""
     def __init__(self, operator, missions, approvals=None,
-                 emergency_stop: Callable[[], Awaitable[None] | None] | None = None) -> None:
+                 emergency_stop: Callable[[], Awaitable[None] | None] | None = None,
+                 approval_authorizer: Callable[[VoiceIntent], Awaitable[bool] | bool] | None = None) -> None:
         self.operator, self.missions, self.approvals, self.emergency_stop = operator, missions, approvals, emergency_stop
+        self.approval_authorizer = approval_authorizer
 
     async def route(self, intent: VoiceIntent) -> dict[str, str | None]:
         if intent.type in {VoiceIntentType.EXECUTE_TASK, VoiceIntentType.CREATE_MISSION}:
@@ -97,6 +102,14 @@ class VoiceRuntimeRouter:
             return {"status": "completed", "mission_id": None,
                     "result": f"{len(self.missions.active())} active missions"}
         if intent.type is VoiceIntentType.APPROVAL:
+            if self.approval_authorizer is None:
+                return {"status": "waiting", "mission_id": None,
+                        "result": "Voice approval is disabled; use the authenticated dashboard"}
+            authorized = self.approval_authorizer(intent)
+            if hasattr(authorized, "__await__"): authorized = await authorized
+            if not authorized:
+                return {"status": "waiting", "mission_id": None,
+                        "result": "Voice approval authorization failed"}
             pending = self.approvals.store.all() if self.approvals else ()
             pending = [item for item in pending if item.status.value == "pending"]
             if len(pending) != 1: return {"status": "waiting", "mission_id": None,
@@ -122,7 +135,7 @@ class VoiceService:
         self._last_activity = monotonic()
 
     async def start(self, user_id: str = "local_user") -> VoiceSession:
-        if self.session and self.session.status not in {VoiceSessionStatus.STOPPED, VoiceSessionStatus.ERROR}:
+        if self.session and self.session.status not in {VoiceSessionStatus.STOPPED, VoiceSessionStatus.ERROR} and self.transport.health_check():
             return self.session
         self.session = VoiceSession(user_id); self.session.status = VoiceSessionStatus.LISTENING
         self._loop = asyncio.get_running_loop()
@@ -146,18 +159,31 @@ class VoiceService:
                 await asyncio.sleep(min(1, self.config.idle_timeout))
                 if monotonic() - started >= self.config.max_session_duration or monotonic() - self._last_activity >= self.config.idle_timeout:
                     await self.pause(); stream.cancel(); break
-            await asyncio.gather(stream, return_exceptions=True)
+            results = await asyncio.gather(stream, return_exceptions=True)
+            failure = next((item for item in results if isinstance(item, Exception)
+                            and not isinstance(item, asyncio.CancelledError)), None)
+            if failure and self.session:
+                self.session.status = VoiceSessionStatus.ERROR
+                self.session.error_state = "Microphone streaming error"
+                await self.events.publish(AutonomousEvent(EventType.VOICE_SESSION,
+                    detail={"session_id": self.session.session_id, "status": "error",
+                            "error": type(failure).__name__}))
         finally:
             if not stream.done(): stream.cancel()
 
     async def stop(self) -> None:
-        await self.transport.disconnect()
+        disconnect_error = None
+        try:
+            await self.transport.disconnect()
+        except Exception as error:
+            disconnect_error = error
         if self.session:
             self.session.status = VoiceSessionStatus.STOPPED; self.session.connection_status = "disconnected"
             self.session.ended_at = datetime.now(timezone.utc)
             self.store.append({"session_id": self.session.session_id, "status": "stopped",
                                "started_at": self.session.started_at.isoformat(), "ended_at": self.session.ended_at.isoformat()})
-            await self.events.publish(AutonomousEvent(EventType.VOICE_SESSION, detail={"session_id": self.session.session_id, "status": "stopped"}))
+            await self.events.publish(AutonomousEvent(EventType.VOICE_SESSION, detail={"session_id": self.session.session_id,
+                "status": "stopped", "disconnect_error": type(disconnect_error).__name__ if disconnect_error else None}))
 
     async def pause(self) -> None:
         await self.transport.disconnect()
@@ -168,7 +194,9 @@ class VoiceService:
         self.session.assemblyai_session_id = await self._connect_with_backoff()
         self.session.status = VoiceSessionStatus.LISTENING; self.session.connection_status = "connected"
 
-    def health_check(self) -> bool: return bool(self.session and self.transport.health_check())
+    def health_check(self) -> bool:
+        return bool(self.session and self.session.status not in {
+            VoiceSessionStatus.STOPPED, VoiceSessionStatus.ERROR} and self.transport.health_check())
 
     def _on_turn(self, turn: VoiceTurn) -> None:
         if self._loop: asyncio.run_coroutine_threadsafe(self.process_turn(turn), self._loop)

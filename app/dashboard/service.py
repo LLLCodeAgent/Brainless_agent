@@ -189,9 +189,9 @@ class DashboardService:
             "voice": redact(self.runtime.voice.snapshot()) if self.runtime.voice else {
                 "status": "not_configured", "connection": "disconnected", "history": [],
                 "current_transcript": "", "final_transcript": "", "error": None},
-            "perception": redact(self.runtime.perception.snapshot()) if self.runtime.perception else {
+            "perception": self._perception() if self.runtime.perception else {
                 "status": "not_configured", "observations": 0, "average_latency_ms": None,
-                "elements": [], "sources": []},
+                "elements": [], "sources": [], "screenshot_available": False},
         }
 
     def health(self) -> list[dict[str, str]]:
@@ -204,8 +204,8 @@ class DashboardService:
             "llm_provider": "healthy" if self.runtime.provider_names else "not_configured",
             "browser": "unknown", "computer_control": "healthy", "dashboard_api": "healthy",
             "knowledge_graph": "not_configured",
-            "voice": "healthy" if self.runtime.voice and self.runtime.voice.health_check() else "not_configured",
-            "multimodal_perception": "healthy" if self.runtime.perception else "not_configured",
+            "voice": self._voice_health(),
+            "multimodal_perception": self._perception_health(),
         }
         return [{"component": key, "status": value, "last_seen": now} for key, value in checks.items()]
 
@@ -334,6 +334,21 @@ class DashboardService:
                  "status": item.status.value, "requested_at": item.requested_at,
                  "decided_at": item.decided_at, "decided_by": item.decided_by}
                 for item in self.runtime.approval_system.store.all() if item.status is ApprovalStatus.PENDING]
+
+    def _perception(self) -> dict[str, Any]:
+        projection = redact(self.runtime.perception.snapshot())
+        projection["screenshot_available"] = bool(projection.pop("screenshot_reference", None))
+        return projection
+
+    def _voice_health(self) -> str:
+        if self.runtime.voice is None: return "not_configured"
+        if self.runtime.voice.health_check(): return "healthy"
+        return "offline" if self.runtime.voice.snapshot().get("configured") else "not_configured"
+
+    def _perception_health(self) -> str:
+        if self.runtime.perception is None: return "not_configured"
+        status = self.runtime.perception.snapshot().get("status")
+        return {"available": "healthy", "waiting": "offline"}.get(status, status)
 
     def _task_mission_index(self) -> dict[str, str]:
         return {task_id: mission.mission_id for mission in self.runtime.missions.all()

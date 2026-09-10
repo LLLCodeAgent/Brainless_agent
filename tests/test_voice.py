@@ -99,3 +99,28 @@ def test_interrupt_intents_have_deterministic_priority():
     assert engine.parse("Stop everything", 1).type is VoiceIntentType.EMERGENCY_STOP
     assert engine.parse("Pause", 1).type is VoiceIntentType.PAUSE
     assert engine.parse("What's running?", 1).type is VoiceIntentType.QUERY_STATUS
+
+
+def test_voice_approval_fails_closed_without_independent_authorizer(tmp_path):
+    async def scenario():
+        service, *_ = runtime(tmp_path)
+        result = await service.router.route(VoiceIntentEngine().parse("Approve", 1))
+        assert result["status"] == "waiting"
+        assert "authenticated dashboard" in result["result"]
+    asyncio.run(scenario())
+
+
+def test_voice_control_plane_reconnects_a_paused_session(tmp_path):
+    from app.voice.controller import VoiceControlPlane
+    async def scenario():
+        service, transport, *_ = runtime(tmp_path)
+        control = VoiceControlPlane(lambda _: service)
+        control.configure("assembly-key-long-enough")
+        await control.start()
+        assert transport.connects == 1
+        await service.pause()
+        assert not control.health_check()
+        await control.start()
+        assert transport.connects == 2 and control.health_check()
+        await control.stop()
+    asyncio.run(scenario())
