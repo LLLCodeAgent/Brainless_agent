@@ -133,3 +133,26 @@ def test_dashboard_approval_decision_flows_through_durable_runtime_authority(tmp
         assert await waiter is True
         assert DashboardService(runtime).snapshot()["approvals"] == []
     asyncio.run(scenario())
+
+
+def test_dashboard_correlates_agents_actions_and_events_to_authoritative_mission(tmp_path):
+    from app.autonomy.models import AuditRecord
+    from datetime import datetime, timezone
+
+    runtime, service, _ = dashboard(tmp_path)
+    agent = runtime.agents.list_agents()[0]
+    mission = Mission("trace work", "user", task_graph={
+        "trace-task": {"objective": "trace", "status": "running"}})
+    runtime.missions.save(mission)
+    agent.current_task_id = "trace-task"
+    runtime.actions.audit.append(AuditRecord(
+        datetime.now(timezone.utc), agent.agent_id, None, "trace-task", "action",
+        "filesystem.read", "filesystem.read", {}, "ok", None, 1,
+        "auto_approve", "not_required"))
+    asyncio.run(runtime.events.publish(AutonomousEvent(
+        EventType.ACTION_RECORDED, detail={"task_id": "trace-task", "agent_id": agent.agent_id})))
+
+    snapshot = service.snapshot()
+    assert snapshot["agents"][0]["mission_id"] == mission.mission_id
+    assert snapshot["actions"][0]["mission_id"] == mission.mission_id
+    assert snapshot["events"][0]["mission_id"] == mission.mission_id

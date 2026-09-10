@@ -124,10 +124,12 @@ class DashboardService:
 
     def snapshot(self) -> dict[str, Any]:
         missions = [self._mission(item) for item in self.runtime.missions.all()]
-        agents = [self._agent(item) for item in self.runtime.agents.list_agents()]
-        actions = [self._action(item) for item in self.runtime.actions.audit]
         schedules = [self._trigger(item) for item in self.runtime.triggers.all()] if self.runtime.triggers else []
         tasks = [task for mission in missions for task in mission["tasks"]]
+        task_missions = {task["task_id"]: task["mission_id"] for task in tasks}
+        agents = [self._agent(item, task_missions) for item in self.runtime.agents.list_agents()]
+        actions = [self._action(item, task_missions) for item in self.runtime.actions.audit]
+        events = self.events(task_missions=task_missions)
         statuses = [mission["status"] for mission in missions]
         pending_approvals = self._approvals()
         return {
@@ -144,13 +146,13 @@ class DashboardService:
                 "pending_approvals": len(pending_approvals),
             },
             "health": self.health(), "missions": missions, "tasks": tasks, "agents": agents,
-            "schedules": schedules, "events": self.events(), "actions": actions,
+            "schedules": schedules, "events": events, "actions": actions,
             "approvals": pending_approvals, "resources": {"locks": self.runtime.actions.locks.owners,
                 "queue_depth": self.runtime.events.queue_depth, "agent_count": len(agents), "task_count": len(tasks)},
             "world": self._world(), "inventory": self.inventory(),
-            "recovery": [event for event in self.events() if event["event_type"] in {"agent_failed", "task_failed"}],
+            "recovery": [event for event in events if event["event_type"] in {"agent_failed", "task_failed"}],
             "security": [action for action in actions if action["error"] or action["policy_decision"] != "auto_approve"],
-            "logs": self.events(),
+            "logs": events,
             "notifications": self.notifications(), "analytics": self.analytics(missions, tasks, agents, actions),
             "memory": self.memory(), "skills": self.skills(),
         }
@@ -168,8 +170,10 @@ class DashboardService:
         }
         return [{"component": key, "status": value, "last_seen": now} for key, value in checks.items()]
 
-    def events(self, *, since: int = 0, limit: int = 200) -> list[dict[str, Any]]:
-        return [self._event(item) for item in self.runtime.events.replay(since, limit)]
+    def events(self, *, since: int = 0, limit: int = 200,
+               task_missions: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        task_missions = task_missions or self._task_mission_index()
+        return [self._event(item, task_missions) for item in self.runtime.events.replay(since, limit)]
 
     def search(self, query: str) -> list[dict[str, Any]]:
         needle = query.casefold().strip()
@@ -246,24 +250,28 @@ class DashboardService:
                 "updated_at": mission.last_activity, "next_wakeup": mission.next_wakeup, "tasks": tasks}
 
     @staticmethod
-    def _agent(agent) -> dict[str, Any]:
+    def _agent(agent, task_missions: dict[str, str] | None = None) -> dict[str, Any]:
+        task_missions = task_missions or {}
         return {"agent_id": agent.agent_id, "name": agent.name, "role": agent.role,
                 "parent_agent_id": agent.parent_agent_id, "children": list(agent.child_agents),
                 "status": agent.status.value, "current_task": agent.current_task,
-                "task_id": agent.current_task_id, "permissions": sorted(agent.permissions),
+                "task_id": agent.current_task_id, "mission_id": task_missions.get(agent.current_task_id),
+                "permissions": sorted(agent.permissions),
                 "tools": sorted(agent.available_tools), "created_at": agent.created_at.isoformat(),
                 "last_action": agent.execution_history[-1].tool_id if agent.execution_history else None,
                 "health": "failed" if agent.status in {AgentStatus.FAILED, AgentStatus.TERMINATED} else "healthy"}
 
     @staticmethod
-    def _action(record) -> dict[str, Any]:
+    def _action(record, task_missions: dict[str, str] | None = None) -> dict[str, Any]:
         data = asdict(record); data["timestamp"] = record.timestamp.isoformat()
+        data["mission_id"] = (task_missions or {}).get(record.task_id)
         data["arguments"] = _redact(data["arguments"]); return data
 
     @staticmethod
-    def _event(event: AutonomousEvent) -> dict[str, Any]:
+    def _event(event: AutonomousEvent, task_missions: dict[str, str] | None = None) -> dict[str, Any]:
+        task_id = event.detail.get("task_id")
         return {"sequence": event.sequence, "timestamp": event.timestamp.isoformat(), "event_type": event.type.value,
-                "mission_id": event.mission_id, "task_id": event.detail.get("task_id"),
+                "mission_id": event.mission_id or (task_missions or {}).get(task_id), "task_id": task_id,
                 "agent_id": event.detail.get("agent_id"), "status": event.detail.get("status"),
                 "severity": event.detail.get("severity", "info"), "correlation_id": event.correlation_id,
                 "payload": _redact(event.detail)}
@@ -287,6 +295,10 @@ class DashboardService:
                  "status": item.status.value, "requested_at": item.requested_at,
                  "decided_at": item.decided_at, "decided_by": item.decided_by}
                 for item in self.runtime.approval_system.store.all() if item.status is ApprovalStatus.PENDING]
+
+    def _task_mission_index(self) -> dict[str, str]:
+        return {task_id: mission.mission_id for mission in self.runtime.missions.all()
+                for task_id in mission.task_graph}
 
 
 def _redact(value: Any) -> Any:

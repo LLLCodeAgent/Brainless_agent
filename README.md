@@ -72,6 +72,8 @@ The dashboard event bus retains a bounded 2,000-event in-memory replay window wi
 
 Runtime agent and action records are incrementally bridged into correlated dashboard events. The Analytics page uses real terminal mission/task, action audit, retry, intervention, agent failure, and approval records. A rate displays `N/A` when no valid denominator exists rather than inventing a score. Mission execution runs in supervised mode: medium/high-risk actions create metadata-only durable approval requests, wait without acquiring resources, and resume only after an authenticated dashboard decision passes through `ApprovalSystem`. Action arguments and sensitive text are never written to the approval store.
 
+The dashboard builds an authoritative task-to-mission index from persisted mission graphs and uses it to correlate agents, action audits, and events that carry only a task ID. Selecting a mission opens a drill-down with its objective, policy, acceptance criteria, constraints, task graph, assigned agents, and correlated event timeline. Correlation is a read-only projection: it never rewrites event, agent, action, or mission records.
+
 ### Dashboard security and deployment
 
 The server binds to loopback by default. Put it behind an authenticated TLS reverse proxy for remote access and rotate `BRAINLESS_DASHBOARD_TOKEN` operationally. Read endpoints and SSE require the token; mutation requests are schema-limited, size-bounded, authenticated, and routed through the runtime command gateway. Responses add restrictive framing, content-type, referrer, browser-permission, and content-security headers. Sensitive argument and state keys are recursively redacted. The dashboard cannot grant permissions, execute tools, write WorldState, or contact a reasoning provider.

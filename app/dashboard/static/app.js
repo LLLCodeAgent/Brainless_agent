@@ -4,6 +4,7 @@ const state = {
   token: sessionStorage.getItem('ba-token') || '',
   lastEvent: 0,
   streaming: false,
+  selectedMission: null,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -19,6 +20,7 @@ const empty = label => `<div class="empty"><strong>No ${esc(label)}</strong><spa
 const viewMeta = {
   overview: ['System overview', 'Live operational state from the authoritative runtime.'],
   missions: ['Mission center', 'Long-running objectives, progress, and controlled lifecycle actions.'],
+  missionDetail: ['Mission detail', 'Objective, policy, task graph, agents, and correlated execution history.'],
   tasks: ['Task center', 'Verified work derived from active and historical mission graphs.'],
   schedules: ['Scheduler', 'Upcoming runtime wakeups and event-driven triggers.'],
   agents: ['Agent control center', 'Registered agents, delegated authority, work, and health.'],
@@ -70,8 +72,17 @@ function missions() {
     const total = completed + remaining;
     const width = total ? Math.round(completed / total * 100) : 0;
     const terminal = ['completed', 'failed', 'cancelled'].includes(mission.status);
-    return `<tr><td><code>${shortId(mission.mission_id)}</code></td><td><b>${esc(mission.objective)}</b></td><td>${status(mission.status)}</td><td>${mission.priority}</td><td>${completed} done · ${remaining} left<div class="metric-bar"><i style="width:${width}%"></i></div></td><td>${formatDate(mission.updated_at)}</td><td>${terminal ? '<span class="muted">Final</span>' : `<button data-command="${mission.status === 'paused' ? 'resume_mission' : 'pause_mission'}" data-mission="${esc(mission.mission_id)}">${mission.status === 'paused' ? 'Resume' : 'Pause'}</button> <button class="danger" data-command="cancel_mission" data-mission="${esc(mission.mission_id)}">Cancel</button>`}</td></tr>`;
+    return `<tr><td><button class="link-button" data-mission-view="${esc(mission.mission_id)}"><code>${shortId(mission.mission_id)}</code></button></td><td><button class="link-button" data-mission-view="${esc(mission.mission_id)}"><b>${esc(mission.objective)}</b></button></td><td>${status(mission.status)}</td><td>${mission.priority}</td><td>${completed} done · ${remaining} left<div class="metric-bar"><i style="width:${width}%"></i></div></td><td>${formatDate(mission.updated_at)}</td><td>${terminal ? '<span class="muted">Final</span>' : `<button data-command="${mission.status === 'paused' ? 'resume_mission' : 'pause_mission'}" data-mission="${esc(mission.mission_id)}">${mission.status === 'paused' ? 'Resume' : 'Pause'}</button> <button class="danger" data-command="cancel_mission" data-mission="${esc(mission.mission_id)}">Cancel</button>`}</td></tr>`;
   }), 'missions');
+}
+
+function missionDetail() {
+  const mission = state.data.missions.find(item => item.mission_id === state.selectedMission);
+  if (!mission) return empty('mission');
+  const relatedAgents = state.data.agents.filter(agent => agent.mission_id === mission.mission_id);
+  const relatedEvents = state.data.events.filter(event => event.mission_id === mission.mission_id);
+  const taskNodes = mission.tasks.map((task, index) => `<div class="task-node"><span>${index + 1}</span><div><b>${esc(task.description)}</b><small><code>${shortId(task.task_id)}</code> · ${task.retries || 0} retries</small></div>${status(task.status)}</div>`).join('') || empty('tasks');
+  return `<button class="back-button" data-back="missions">← Back to missions</button><div class="detail-hero"><div><p class="eyebrow">MISSION ${shortId(mission.mission_id)}</p><h2>${esc(mission.objective)}</h2><p>${esc(mission.owner)} · Created ${formatDate(mission.created_at)}</p></div>${status(mission.status)}</div><div class="detail-grid"><section class="panel"><div class="panel-header"><h2>Task graph</h2><small>${mission.tasks.length} nodes</small></div><div class="task-graph">${taskNodes}</div></section><section class="panel detail-list"><h2>Mission policy</h2><dl><dt>Priority</dt><dd>${mission.priority}</dd><dt>Deadline</dt><dd>${formatDate(mission.deadline)}</dd><dt>Next wakeup</dt><dd>${formatDate(mission.next_wakeup)}</dd><dt>Active agents</dt><dd>${relatedAgents.length}</dd></dl><h2>Acceptance criteria</h2>${mission.acceptance_criteria.length ? `<ul>${mission.acceptance_criteria.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p class="muted">No explicit criteria recorded</p>'}<h2>Constraints</h2>${mission.constraints.length ? `<ul>${mission.constraints.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : '<p class="muted">No constraints recorded</p>'}</section></div><section class="panel" style="margin-top:13px"><div class="panel-header"><h2>Correlated execution timeline</h2><small>${relatedEvents.length} events</small></div><div class="timeline">${relatedEvents.slice().reverse().map(event => `<div class="row"><div><b>${esc(event.event_type.replaceAll('_', ' '))}</b><br><small>Task ${shortId(event.task_id)} · Agent ${shortId(event.agent_id)} · Correlation ${shortId(event.correlation_id)}</small></div><time>${formatTime(event.timestamp)}</time></div>`).join('') || empty('events')}</div></section>`;
 }
 
 function tasks() {
@@ -119,7 +130,7 @@ function skills() { return table(['Skill', 'Status', 'Capabilities', 'Permission
 function inventory() { return table(['Registry', 'Authoritative values'], Object.entries(state.data.inventory).map(([key, value]) => `<tr><td><b>${esc(key.replaceAll('_', ' '))}</b></td><td>${esc(JSON.stringify(value))}</td></tr>`), 'inventory entries'); }
 function analytics() { return `<div class="cards">${Object.entries(state.data.analytics).map(([key, value]) => `<article class="card"><span>${esc(key.replaceAll('_', ' ').toUpperCase())}</span><strong>${value == null ? 'N/A' : key.includes('rate') || key.includes('score') ? Math.round(value * 100) + '%' : Math.round(value)}</strong><small>${value == null ? 'Insufficient runtime data' : 'Observed outcomes only'}</small></article>`).join('')}</div><section class="panel" style="margin-top:13px"><h2>Metric integrity</h2><p class="muted">Rates use successful observed outcomes divided by corresponding real terminal runtime records. N/A means no valid denominator exists; the command center never invents a score.</p></section>`; }
 
-const views = {overview, missions, tasks, schedules, agents, hierarchy, actions, world, resources, approvals, recovery, security, activity, memory, skills, analytics, inventory, health};
+const views = {overview, missions, missionDetail, tasks, schedules, agents, hierarchy, actions, world, resources, approvals, recovery, security, activity, memory, skills, analytics, inventory, health};
 
 function setConnection(mode, label) {
   $('#streamBadge').className = `connection ${mode}`;
@@ -207,6 +218,8 @@ $('#newMission').addEventListener('click', () => $('#missionDialog').showModal()
 $('#connect').addEventListener('click', event => { event.preventDefault(); state.token = $('#token').value.trim(); sessionStorage.setItem('ba-token', state.token); $('#auth').close(); refresh(); stream(); });
 $('#submitMission').addEventListener('click', event => { event.preventDefault(); const goal = $('#missionGoal').value.trim(); if (!goal) return $('#missionGoal').reportValidity(); $('#missionDialog').close(); command('create_mission', {goal, priority: Number($('#missionPriority').value)}); $('#missionGoal').value = ''; });
 $('#content').addEventListener('click', event => { const button = event.target.closest('[data-command]'); if (button) command(button.dataset.command, {mission_id: button.dataset.mission, approval_id: button.dataset.approval}); });
+$('#content').addEventListener('click', event => { const button = event.target.closest('[data-mission-view]'); if (!button) return; state.selectedMission = button.dataset.missionView; state.view = 'missionDetail'; history.replaceState(null, '', '#missions'); $('#pageTitle').textContent = 'Mission detail'; render(); });
+$('#content').addEventListener('click', event => { const button = event.target.closest('[data-back]'); if (!button) return; state.selectedMission = null; state.view = button.dataset.back; location.hash = state.view; render(); });
 $('#search').addEventListener('keydown', async event => { if (event.key !== 'Enter') return; try { const results = await api(`/api/search?q=${encodeURIComponent(event.target.value)}`); $('#pageTitle').textContent = 'Search results'; $('#pageDescription').textContent = `${results.length} structured runtime records matched “${event.target.value}”.`; $('#content').innerHTML = table(['Category', 'Record'], results.map(result => `<tr><td>${status(result.category)}</td><td><pre>${esc(JSON.stringify(result.item, null, 2))}</pre></td></tr>`), 'search results'); } catch (error) { toast(error.message, 'error'); } });
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); $('#search').focus(); } });
 window.addEventListener('hashchange', () => { state.view = location.hash.slice(1) || 'overview'; render(); });
