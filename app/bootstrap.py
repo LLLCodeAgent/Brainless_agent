@@ -13,7 +13,12 @@ from app.memory.sqlite_memory import SQLiteMemory
 from app.prompts.prompt_manager import PromptManager
 from app.providers.registry import ProviderRegistry
 from app.runtime.agent_runtime import AgentRuntime
+from app.autonomy.controllers import PlaywrightComputerController
+from app.autonomy.executor import ActionRuntime as AutonomousActionRuntime
+from app.autonomy.orchestrator import AutonomousRuntime
+from app.autonomy.task_engine import AutonomousTaskEngine
 from app.safety.intervention import UserInterventionGate
+from app.learning import ExperienceMemory, LearningCoordinator, SkillRegistry, AgentPerformanceMemory
 
 
 class Application:
@@ -23,6 +28,17 @@ class Application:
         tools = ToolRegistry()
         register_runtime_tools(tools, self.browser, root, screenshots=ScreenshotRecorder(root / "screenshots"))
         self.agent_manager = AgentManager(tools, audit_store=self.memory)
+        self.autonomous_actions = AutonomousActionRuntime(
+            self.agent_manager, PlaywrightComputerController(self.browser), audit_store=self.memory)
+        self.autonomous = AutonomousRuntime(self.agent_manager, self.autonomous_actions)
+        # Learning stores structured runtime outcomes separately from conversational memory.
+        self.experience_memory = ExperienceMemory(root / "data/experience.db")
+        self.skill_registry = SkillRegistry(root / "data/skills.db")
+        self.learning = LearningCoordinator(self.experience_memory, self.skill_registry)
+        self.agent_performance = AgentPerformanceMemory(root / "data/agent_performance.db")
+        # The normal autonomous entry point shares the controlled learning coordinator.
+        self.task_engine = AutonomousTaskEngine(self.autonomous, self.autonomous_actions,
+                                                journal=self.memory, learning=self.learning, performance=self.agent_performance)
         self.providers = ProviderRegistry.from_settings(self.browser, settings.providers)
         self.runtime = AgentRuntime(
             self.browser, self.providers, PromptManager(root / "prompts"), self.memory,
@@ -32,5 +48,8 @@ class Application:
         )
 
     async def close(self) -> None:
+        self.experience_memory.close()
+        self.skill_registry.close()
+        self.agent_performance.close()
         self.memory.close()
         await self.browser.close()

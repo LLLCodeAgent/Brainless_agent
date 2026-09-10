@@ -27,6 +27,10 @@ class ToolSpec:
     handler: ToolHandler
     input_schema: tuple[str, ...] = ()
     output_schema: str = "any"
+    category: str = "general"
+    supported_platforms: tuple[str, ...] = ("any",)
+    reversible: bool = True
+    destructive: bool = False
 
 
 class ToolRegistry:
@@ -43,6 +47,13 @@ class ToolRegistry:
             return self._tools[tool_id]
         except KeyError as error:
             raise KeyError(f"Unknown tool: {tool_id}") from error
+
+    def contains(self, tool_id: str) -> bool:
+        return tool_id in self._tools
+
+    @property
+    def tool_ids(self) -> tuple[str, ...]:
+        return tuple(self._tools)
 
     async def invoke(self, tool_id: str, arguments: dict[str, Any]) -> Any:
         tool = self.get(tool_id)
