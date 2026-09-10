@@ -1,6 +1,6 @@
 # Brainless Agent
 
-Brainless Agent is a Python computer-use runtime. It orchestrates a real, persistent Chrome session and uses chatbot **websites** as interchangeable reasoning engines. It does not call OpenAI, Gemini, Anthropic, or any other model reasoning API, and it has no API-key configuration.
+Brainless Agent is a Python computer-use runtime. It orchestrates a real, persistent Chrome session and uses chatbot **websites** as interchangeable reasoning engines. It does not call OpenAI, Gemini, Anthropic, or another model reasoning API. The optional AssemblyAI key is used only for speech transcription and never grants reasoning or execution authority.
 
 ## vNext autonomous computer-agent runtime
 
@@ -103,6 +103,8 @@ Speech confidence, intent classification, authorization, and verification are se
 Raw audio is never persisted. Transcript persistence defaults off; durable records contain session/intent/result metadata and `[NOT STORED]` in persisted event transcripts. If enabled, transcript storage is bounded and recursively redacts credential-like content. Session duration, idle timeout, reconnect count, language, confidence thresholds, transcript retention behavior, and model are environment-configurable. Connections use bounded exponential backoff and are explicitly terminated during runtime shutdown. The Voice dashboard shows the ephemeral live transcript, last finalized turn, connection/session state, active mission, bounded command history, confidence, errors, and real session metrics.
 
 Troubleshooting: `not_configured` means no API key was supplied; `disconnected` indicates no active bounded session; microphone failures require an OS input device and the SDK's audio extras. Keep `VOICE_STORE_AUDIO=false`—the implementation rejects raw-audio persistence. For cost control, prefer push-to-talk or a bounded voice session instead of continuous mode.
+
+The Voice page also supports runtime-only credential setup: select **Configure AssemblyAI**, enter the key in the password field, and then hold **Hold to talk**. This authenticated command is handled by the same runtime gateway as other dashboard controls. The key is validated, passed through a write-only control plane, and retained only inside the in-memory AssemblyAI client configuration; snapshots, responses, SSE events, audit details, and the voice metadata store never contain it. Restarting the process clears a dashboard-supplied key. Use `ASSEMBLYAI_API_KEY` when durable deployment configuration is required, and use a TLS reverse proxy before accessing the dashboard remotely because the built-in server intentionally binds plain HTTP to loopback.
 
 ## Installation
 

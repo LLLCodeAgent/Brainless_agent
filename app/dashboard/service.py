@@ -29,6 +29,9 @@ class DashboardCommand(str, Enum):
     RELEASE_TAKEOVER = "release_takeover"
     APPROVE = "approve"
     DENY = "deny"
+    CONFIGURE_VOICE = "configure_voice"
+    START_VOICE = "start_voice"
+    STOP_VOICE = "stop_voice"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +110,18 @@ class RuntimeCommandGateway:
             status = ApprovalStatus.APPROVED if requested is DashboardCommand.APPROVE else ApprovalStatus.DENIED
             approval = self.runtime.approval_system.decide(approval_id, status, "dashboard_user")
             mission_id = approval.mission_id
+        elif requested is DashboardCommand.CONFIGURE_VOICE:
+            if self.runtime.voice is None: raise ValueError("Voice control is unavailable")
+            api_key = str(payload.get("api_key", ""))
+            settings = {key: payload[key] for key in ("model", "language", "idle_timeout",
+                "max_session_duration", "min_confidence", "sensitive_confidence") if key in payload}
+            self.runtime.voice.configure(api_key, settings)
+        elif requested is DashboardCommand.START_VOICE:
+            if self.runtime.voice is None: raise ValueError("Voice control is unavailable")
+            await self.runtime.voice.start()
+        elif requested is DashboardCommand.STOP_VOICE:
+            if self.runtime.voice is None: raise ValueError("Voice control is unavailable")
+            await self.runtime.voice.stop()
         correlation_id = str(uuid4())
         event_type = EventType.APPROVAL_RECEIVED if requested in {
             DashboardCommand.APPROVE, DashboardCommand.DENY} else EventType.USER_MESSAGE

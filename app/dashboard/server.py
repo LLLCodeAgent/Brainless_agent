@@ -4,6 +4,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import asyncio
 from pathlib import Path
 from threading import Thread
 from urllib.parse import parse_qs, urlparse
@@ -15,8 +16,10 @@ _STATIC = Path(__file__).with_name("static")
 
 class DashboardServer:
     def __init__(self, service: DashboardService, commands: RuntimeCommandGateway,
-                 host: str = "127.0.0.1", port: int = 0) -> None:
+                 host: str = "127.0.0.1", port: int = 0,
+                 event_loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.service, self.commands = service, commands
+        self.event_loop = event_loop
         self.httpd = ThreadingHTTPServer((host, port), self._handler())
         self.thread: Thread | None = None
 
@@ -31,7 +34,7 @@ class DashboardServer:
         if self.thread: self.thread.join(timeout=2)
 
     def _handler(self):
-        service, commands = self.service, self.commands
+        service, commands, event_loop = self.service, self.commands, self.event_loop
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_GET(self):
@@ -72,8 +75,9 @@ class DashboardServer:
                     length=int(self.headers.get("Content-Length","0"))
                     if length > 16_384: return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,{"error":"too_large"})
                     data=json.loads(self.rfile.read(length)); token=self.headers.get("Authorization","").removeprefix("Bearer ")
-                    import asyncio
-                    result=asyncio.run(commands.execute(token,str(data["command"]),dict(data.get("payload",{}))))
+                    operation=commands.execute(token,str(data["command"]),dict(data.get("payload",{})))
+                    result=(asyncio.run_coroutine_threadsafe(operation,event_loop).result(timeout=30)
+                            if event_loop else asyncio.run(operation))
                     return self._json(HTTPStatus.ACCEPTED,result)
                 except DashboardAuthorizationError: return self._json(HTTPStatus.UNAUTHORIZED,{"error":"unauthorized"})
                 except (KeyError,ValueError,TypeError,json.JSONDecodeError) as error: return self._json(HTTPStatus.BAD_REQUEST,{"error":str(error)})
