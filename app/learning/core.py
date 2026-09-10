@@ -168,6 +168,7 @@ class SkillRegistry:
     def versions(self, name: str) -> list[Skill]: return [_skill(json.loads(row["payload_json"])) for row in self.db.execute("SELECT * FROM skills WHERE name=? ORDER BY version", (name,))]
     def search(self, goal: str, *, statuses: tuple[SkillStatus, ...] = (SkillStatus.VERIFIED, SkillStatus.TRUSTED)) -> list[Skill]:
         wanted = set(_terms(goal)); return [skill for skill in self._all() if skill.status in statuses and wanted & set(_terms(skill.name + " " + skill.description))]
+    def list_skills(self) -> tuple[Skill, ...]: return tuple(self._all())
     def get(self, skill_id: str) -> Skill: return _skill(json.loads(self.db.execute("SELECT payload_json FROM skills WHERE id=?", (skill_id,)).fetchone()[0]))
     def set_status(self, skill_id: str, status: SkillStatus, *, actor: str = "system", reason: str = "lifecycle transition") -> None:
         skill = self.get(skill_id)

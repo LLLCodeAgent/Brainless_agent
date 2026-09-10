@@ -12,17 +12,29 @@ from app.autonomy.operator import AutonomousOperator
 from app.autonomy.perception_service import PerceptionService
 from app.autonomy.production_mission import RuntimeMissionComposer
 from app.autonomy.reasoning_provider import ChatbotReasoningProvider
+from app.autonomy.approvals import ApprovalStore, ApprovalSystem
+from app.autonomy.mode_policy import ModePolicy
+from app.autonomy.triggers import TriggerEngine, TriggerStore
 from app.bootstrap import Application
 from app.config.settings import load_settings
 from app.dashboard import DashboardRuntime, DashboardServer, DashboardService, RuntimeCommandGateway
 from app.dashboard.runtime_bridge import RuntimeEventBridge
 from app.safety.permissions import Permission
+from app.autonomy.operator import AutonomyMode
+from app.autonomy.health import AgentHealthMonitor
 
 
-async def _pump(bridge: RuntimeEventBridge) -> None:
+async def _pump(bridge: RuntimeEventBridge, health: AgentHealthMonitor) -> None:
     while True:
         await bridge.pump_once()
+        health.inspect()
         await asyncio.sleep(.25)
+
+
+async def _tick_triggers(triggers: TriggerEngine) -> None:
+    while True:
+        await triggers.tick()
+        await asyncio.sleep(1)
 
 
 async def serve() -> None:
@@ -34,6 +46,13 @@ async def serve() -> None:
     event_store = EventStore(root / "data/dashboard-events.db")
     events = AutonomousEventBus(persistence=event_store)
     missions = MissionStore(root / "data/missions.json")
+    trigger_store = TriggerStore(root / "data/triggers.json")
+    trigger_engine = TriggerEngine(trigger_store, events, policy=lambda trigger: (
+        (mission := missions.load(trigger.mission_id)) is not None and
+        mission.status.value not in {"completed", "failed", "cancelled"}))
+    approvals = ApprovalSystem(ApprovalStore(root / "data/approvals.json"), application.agent_manager)
+    application.autonomous_actions.approval_handler = approvals.request
+    application.autonomous_actions.mode_policy = ModePolicy(AutonomyMode.SUPERVISED)
     execution_status = "not_configured"
     if application.providers.names:
         provider = application.providers.get(application.providers.names[0])
@@ -49,20 +68,23 @@ async def serve() -> None:
     operator = AutonomousOperator(missions, PerceptionService(
         application.autonomous_actions.controller, application.autonomous_actions.world_state, events), events, runner)
     runtime = DashboardRuntime(missions, events, operator, application.agent_manager,
-        application.autonomous_actions, provider_names=application.providers.names,
-        mission_execution_status=execution_status)
+        application.autonomous_actions, triggers=trigger_store, memory=application.memory,
+        skills=application.skill_registry, provider_names=application.providers.names,
+        mission_execution_status=execution_status, approval_system=approvals)
     gateway = RuntimeCommandGateway(runtime, token)
     server = DashboardServer(DashboardService(runtime), gateway, port=8765)
     bridge_task = asyncio.create_task(_pump(RuntimeEventBridge(
-        application.agent_manager, application.autonomous_actions, events)))
+        application.agent_manager, application.autonomous_actions, events),
+        AgentHealthMonitor(application.agent_manager, application.autonomous_actions.locks)))
     operator_task = asyncio.create_task(operator.run_background(stop=lambda: False))
+    trigger_task = asyncio.create_task(_tick_triggers(trigger_engine))
     server.start()
     print("Command Center: http://127.0.0.1:8765")
     try:
         await asyncio.Event().wait()
     finally:
-        operator_task.cancel(); bridge_task.cancel()
-        await asyncio.gather(operator_task, bridge_task, return_exceptions=True)
+        operator_task.cancel(); bridge_task.cancel(); trigger_task.cancel()
+        await asyncio.gather(operator_task, bridge_task, trigger_task, return_exceptions=True)
         server.close(); event_store.close(); await application.close()
 
 

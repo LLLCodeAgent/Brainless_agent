@@ -96,3 +96,35 @@ def test_interruption_and_presence_detection_keep_user_data_out_of_runtime():
     assert interruption.kind is InterruptionKind.LOGIN and interruption.requires_user
     detector = UserPresenceDetector(lambda: True)
     assert detector.present() and detector.last_seen is not None
+
+
+def test_supervised_runtime_waits_for_independent_approval_before_execution(tmp_path):
+    from app.agents.manager import AgentManager
+    from app.autonomy.approvals import ApprovalStatus, ApprovalStore, ApprovalSystem
+    from app.autonomy.controllers import FilesystemComputerController
+    from app.autonomy.executor import ActionRuntime
+    from app.autonomy.mode_policy import ModePolicy
+    from app.autonomy.models import ActionProposal
+    from app.autonomy.operator import AutonomyMode
+    from app.safety.permissions import Permission
+
+    async def scenario():
+        manager = AgentManager()
+        root = manager.create_root("root", "root", "goal", {Permission.FILESYSTEM_WRITE.value})
+        approvals = ApprovalSystem(ApprovalStore(tmp_path / "approvals.json"), manager, timeout_seconds=2)
+        runtime = ActionRuntime(manager, FilesystemComputerController(tmp_path),
+            approval_handler=approvals.request, mode_policy=ModePolicy(AutonomyMode.SUPERVISED))
+        child = manager.create_agent(root.agent_id, "writer", "writer", "write", task="write",
+            permissions={Permission.FILESYSTEM_WRITE.value}, tools={"filesystem.write"}, task_id="task")
+        async def work(agent, _):
+            pending = asyncio.create_task(runtime.perform_proposal(agent.agent_id, "task",
+                ActionProposal("filesystem.write", {"path": "approved.txt", "content": "yes"}, "write approved file")))
+            await asyncio.sleep(.05)
+            request = approvals.store.all()[0]
+            assert not (tmp_path / "approved.txt").exists()
+            approvals.decide(request.approval_id, ApprovalStatus.APPROVED, "human")
+            result = await pending
+            assert result.success and (tmp_path / "approved.txt").read_text() == "yes"
+            return "done"
+        await manager.start_agent(root.agent_id, child.agent_id, work)
+    asyncio.run(scenario())

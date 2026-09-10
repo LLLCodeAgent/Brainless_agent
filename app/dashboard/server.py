@@ -52,6 +52,7 @@ class DashboardServer:
                     "/api/resources":"resources","/api/world":"world","/api/system/inventory":"inventory",
                     "/api/recovery":"recovery","/api/security":"security","/api/logs":"logs"}
                 projections.update({"/api/analytics":"analytics", "/api/notifications":"notifications"})
+                projections.update({"/api/memory":"memory", "/api/skills":"skills"})
                 if parsed.path in projections:
                     return self._json(HTTPStatus.OK, service.snapshot()[projections[parsed.path]])
                 if parsed.path == "/api/stream":

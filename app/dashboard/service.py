@@ -13,6 +13,7 @@ from app.autonomy.events import AutonomousEvent, AutonomousEventBus, EventType
 from app.autonomy.mission import Mission, MissionStatus, MissionStore
 from app.autonomy.operator import AutonomousOperator
 from app.autonomy.triggers import TriggerStore
+from app.autonomy.approvals import ApprovalStatus, ApprovalSystem
 
 
 class DashboardAuthorizationError(PermissionError):
@@ -26,6 +27,8 @@ class DashboardCommand(str, Enum):
     CANCEL_MISSION = "cancel_mission"
     TAKE_OVER = "take_over"
     RELEASE_TAKEOVER = "release_takeover"
+    APPROVE = "approve"
+    DENY = "deny"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,7 @@ class DashboardRuntime:
     skills: Any = None
     provider_names: tuple[str, ...] = ()
     mission_execution_status: str = "healthy"
+    approval_system: ApprovalSystem | None = None
 
 
 class RuntimeCommandGateway:
@@ -95,9 +99,18 @@ class RuntimeCommandGateway:
             self.runtime.operator.takeover.begin()
         elif requested is DashboardCommand.RELEASE_TAKEOVER:
             self.runtime.operator.takeover.resume()
+        elif requested in {DashboardCommand.APPROVE, DashboardCommand.DENY}:
+            if self.runtime.approval_system is None:
+                raise ValueError("Approval system is not configured")
+            approval_id = str(payload.get("approval_id", ""))
+            status = ApprovalStatus.APPROVED if requested is DashboardCommand.APPROVE else ApprovalStatus.DENIED
+            approval = self.runtime.approval_system.decide(approval_id, status, "dashboard_user")
+            mission_id = approval.mission_id
         correlation_id = str(uuid4())
+        event_type = EventType.APPROVAL_RECEIVED if requested in {
+            DashboardCommand.APPROVE, DashboardCommand.DENY} else EventType.USER_MESSAGE
         await self.runtime.events.publish(AutonomousEvent(
-            EventType.USER_MESSAGE, mission_id or None,
+            event_type, mission_id or None,
             {"command": requested.value, "status": "accepted", "correlation_id": correlation_id},
             correlation_id=correlation_id,
         ))
@@ -116,7 +129,7 @@ class DashboardService:
         schedules = [self._trigger(item) for item in self.runtime.triggers.all()] if self.runtime.triggers else []
         tasks = [task for mission in missions for task in mission["tasks"]]
         statuses = [mission["status"] for mission in missions]
-        pending_approvals = [action for action in actions if action["approval_status"] == "required"]
+        pending_approvals = self._approvals()
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "takeover_mode": self.runtime.operator.takeover.mode.value,
@@ -139,6 +152,7 @@ class DashboardService:
             "security": [action for action in actions if action["error"] or action["policy_decision"] != "auto_approve"],
             "logs": self.events(),
             "notifications": self.notifications(), "analytics": self.analytics(missions, tasks, agents, actions),
+            "memory": self.memory(), "skills": self.skills(),
         }
 
     def health(self) -> list[dict[str, str]]:
@@ -172,8 +186,24 @@ class DashboardService:
     def inventory(self) -> dict[str, Any]:
         return {"tools": list(self.runtime.agents.tools.tool_ids),
                 "agents": len(self.runtime.agents.list_agents()),
+                "missions": len(self.runtime.missions.all()),
+                "triggers": len(self.runtime.triggers.all()) if self.runtime.triggers else 0,
+                "skills": len(self.skills()),
                 "permissions": sorted({permission for agent in self.runtime.agents.list_agents() for permission in agent.permissions}),
                 "providers": list(self.runtime.provider_names)}
+
+    def memory(self) -> list[dict[str, Any]]:
+        if self.runtime.memory is None or not hasattr(self.runtime.memory, "recent_metadata"): return []
+        return [_redact(item) for item in self.runtime.memory.recent_metadata()]
+
+    def skills(self) -> list[dict[str, Any]]:
+        if self.runtime.skills is None or not hasattr(self.runtime.skills, "list_skills"): return []
+        return [{"skill_id": item.skill_id, "name": item.name, "description": _redact(item.description),
+                 "status": item.status.value, "required_capabilities": sorted(item.required_capabilities),
+                 "required_permissions": sorted(item.required_permissions),
+                 "verification_method": item.verification_strategy,
+                 "success_rate": item.evaluation.get("success_rate"), "trust": "controlled_artifact"}
+                for item in self.runtime.skills.list_skills()]
 
     def notifications(self) -> list[dict[str, Any]]:
         important = {"task_completed", "task_failed", "agent_failed", "approval_received", "user_takeover"}
@@ -248,6 +278,15 @@ class DashboardService:
         return [{"key": key, "value": _redact(fact.value), "kind": fact.kind.value,
                  "confidence": fact.confidence, "source": fact.source, "timestamp": fact.timestamp.isoformat()}
                 for key, fact in self.runtime.actions.world_state.snapshot().facts.items()]
+
+    def _approvals(self) -> list[dict[str, Any]]:
+        if self.runtime.approval_system is None: return []
+        return [{"approval_id": item.approval_id, "mission_id": item.mission_id,
+                 "task_id": item.task_id, "agent_id": item.agent_id, "tool": item.tool,
+                 "reason": item.reason, "risk_level": item.risk_level, "permission": item.permission,
+                 "status": item.status.value, "requested_at": item.requested_at,
+                 "decided_at": item.decided_at, "decided_by": item.decided_by}
+                for item in self.runtime.approval_system.store.all() if item.status is ApprovalStatus.PENDING]
 
 
 def _redact(value: Any) -> Any:

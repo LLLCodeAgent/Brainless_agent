@@ -103,3 +103,28 @@ def test_analytics_use_real_denominators_and_report_unavailable_without_data(tmp
     analytics = service.snapshot()["analytics"]
     assert analytics["mission_success_rate"] == 1.0
     assert analytics["task_success_rate"] == 1.0
+
+
+def test_dashboard_approval_decision_flows_through_durable_runtime_authority(tmp_path):
+    from app.autonomy.approvals import ApprovalStore, ApprovalSystem
+    from app.autonomy.models import ComputerAction
+    from app.safety.permissions import Permission
+
+    async def scenario():
+        runtime, service, _ = dashboard(tmp_path)
+        approval_system = ApprovalSystem(ApprovalStore(tmp_path / "approvals.json"), runtime.agents, timeout_seconds=2)
+        runtime = DashboardRuntime(runtime.missions, runtime.events, runtime.operator, runtime.agents,
+                                   runtime.actions, approval_system=approval_system)
+        gateway = RuntimeCommandGateway(runtime, TOKEN)
+        action = ComputerAction("keyboard.write", {"text": "not persisted"},
+                                runtime.agents.list_agents()[0].agent_id, "mission:task",
+                                "send text", Permission.KEYBOARD_WRITE.value)
+        waiter = asyncio.create_task(approval_system.request(action))
+        await asyncio.sleep(.05)
+        pending = DashboardService(runtime).snapshot()["approvals"]
+        assert pending[0]["approval_id"] == action.action_id
+        assert "not persisted" not in (tmp_path / "approvals.json").read_text()
+        await gateway.execute(TOKEN, "approve", {"approval_id": action.action_id})
+        assert await waiter is True
+        assert DashboardService(runtime).snapshot()["approvals"] == []
+    asyncio.run(scenario())

@@ -97,8 +97,19 @@ class ActionRuntime:
         mode_decision = self.mode_policy.decision(tool)
         if mode_decision == "deny":
             return self._result(action, False, "Autonomy mode forbids this action", started, ErrorCode.POLICY_DENIED, policy="mode_deny")
-        if mode_decision == "approval" and self.approval_handler is None:
-            return self._result(action, False, "Autonomy mode requires approval", started, ErrorCode.APPROVAL_REQUIRED, policy="mode_approval", approval="required")
+        if mode_decision == "approval":
+            policy_decision, approval_status = "mode_approval", "required"
+            if self.approval_handler is None:
+                return self._result(action, False, "Autonomy mode requires approval", started,
+                                    ErrorCode.APPROVAL_REQUIRED, policy=policy_decision,
+                                    approval=approval_status)
+            approved = self.approval_handler(action)
+            if hasattr(approved, "__await__"):
+                approved = await approved
+            if not approved:
+                return self._result(action, False, "Approval denied", started,
+                                    ErrorCode.POLICY_DENIED, policy="deny", approval="denied")
+            approval_status = "approved"
         contract = self.contracts.get(action.action_type)
         if contract:
             if contract.tool != action.action_type or action.permission not in contract.required_permissions:

@@ -33,3 +33,4 @@ from app.autonomy.monitoring import AutonomyMetrics, Interruption, InterruptionK
 from app.autonomy.event_store import EventStore
 
 from app.autonomy.production_mission import RuntimeMissionComposer, VerifiedMissionCriterion
+from app.autonomy.approvals import ApprovalRequest, ApprovalStatus, ApprovalStore, ApprovalSystem
