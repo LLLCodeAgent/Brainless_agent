@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 from threading import Lock
+from app.safety.redaction import redact
 
 class EventType(str, Enum):
     USER_MESSAGE="user_message"; SCREEN_CHANGED="screen_changed"; WINDOW_CHANGED="window_changed"; BROWSER_NAVIGATED="browser_navigated"
@@ -46,7 +47,7 @@ class AutonomousEventBus:
         from dataclasses import replace
         with self._lock:
             self._sequence += 1
-            recorded = replace(event, sequence=self._sequence)
+            recorded = replace(event, detail=redact(event.detail), sequence=self._sequence)
             self.history.append(recorded)
             if self._persistence:
                 self._persistence.store_event(recorded)

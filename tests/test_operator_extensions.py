@@ -198,3 +198,16 @@ def test_capability_lease_is_task_scoped_and_fail_closed_on_revoke(tmp_path):
         manager.leases.revoke(lease.lease_id)
         assert not manager.leases.permits(child.agent_id, Permission.FILESYSTEM_READ.value, "mission:read")
     asyncio.run(scenario())
+
+
+def test_persisted_event_details_are_redacted_before_storage(tmp_path):
+    from app.autonomy.event_store import EventStore
+    async def scenario():
+        store = EventStore(tmp_path / "events.db")
+        events = AutonomousEventBus(persistence=store)
+        await events.publish(AutonomousEvent(EventType.USER_MESSAGE,
+            detail={"message": "password is hunter2"}))
+        assert events.replay()[0].detail["message"] == "[REDACTED]"
+        store.close()
+        assert "hunter2" not in (tmp_path / "events.db").read_bytes().decode(errors="ignore")
+    asyncio.run(scenario())

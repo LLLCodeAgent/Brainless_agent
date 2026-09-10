@@ -70,7 +70,8 @@ async def serve() -> None:
         async def runner(_):
             raise RuntimeError("No reasoning provider is configured")
     operator = AutonomousOperator(missions, PerceptionService(
-        application.autonomous_actions.controller, application.autonomous_actions.world_state, events), events, runner)
+        application.autonomous_actions.controller, application.autonomous_actions.world_state, events), events, runner,
+        event_handlers=(trigger_engine.handle,))
     def create_voice(config: VoiceConfig) -> VoiceService:
         return VoiceService(config, AssemblyAISpeechProvider(config),
             VoiceRuntimeRouter(operator, missions, approvals), events,

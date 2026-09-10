@@ -4,7 +4,7 @@ from app.agents.manager import AgentManager
 from app.autonomy.controllers import FilesystemComputerController
 from app.autonomy.events import AutonomousEventBus, EventType
 from app.autonomy.executor import ActionRuntime
-from app.autonomy.mission import MissionStatus, MissionStore
+from app.autonomy.mission import Mission, MissionStatus, MissionStore
 from app.autonomy.operator import AutonomousOperator
 from app.autonomy.perception_service import PerceptionService
 from app.dashboard.service import DashboardRuntime, DashboardService
@@ -123,4 +123,16 @@ def test_voice_control_plane_reconnects_a_paused_session(tmp_path):
         await control.start()
         assert transport.connects == 2 and control.health_check()
         await control.stop()
+    asyncio.run(scenario())
+
+
+def test_voice_resume_transitions_paused_mission_and_emits_wakeup(tmp_path):
+    async def scenario():
+        service, _, missions, events, *_ = runtime(tmp_path)
+        mission = Mission("continue safely", "voice", status=MissionStatus.PAUSED)
+        missions.save(mission)
+        result = await service.router.route(VoiceIntentEngine().parse("Resume", 1))
+        assert result["status"] == "completed"
+        assert missions.load(mission.mission_id).status is MissionStatus.WAITING
+        assert events.replay()[-1].type is EventType.MISSION_TRIGGERED
     asyncio.run(scenario())

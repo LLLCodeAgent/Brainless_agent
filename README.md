@@ -142,6 +142,12 @@ The dashboard **Perception** page provides an authenticated **Observe now** cont
 
 Voice approval fails closed by default because speech transcription does not establish speaker identity. Spoken approval can be enabled only by injecting an independent `approval_authorizer`; otherwise the runtime directs the user to the authenticated approval center. Voice configuration also rejects non-finite confidence values and unbounded session settings. Microphone and AssemblyAI teardown failures still produce a clean stopped state, and a paused or disconnected push-to-talk session can reconnect without leaving a zombie listener.
 
+### Automation readiness guarantees
+
+Explicitly paused missions are inert: background events cannot re-observe or restart them until an authenticated dashboard or authorized voice-resume transition changes them back to `waiting`. The operator dispatches consumed runtime events to the persisted trigger engine, so event and mission triggers share the same authoritative event path instead of relying on a second polling implementation. A voice resume both releases takeover and emits mission wakeups for paused user-blocked work.
+
+Event details are redacted before entering either the in-memory history or SQLite event store. Action arguments, outputs, errors, mission failure checkpoints, voice records, and dashboard projections use the same credential-aware redaction boundary, preventing observed password/token material from being fed back to a reasoning provider through action results. This redaction complements—rather than replaces—tool permissions, policy, approvals, mission contracts, and verification.
+
 ## Installation
 
 Requires Python 3.11+ and an installed Google Chrome/Chrome-compatible browser.

@@ -61,3 +61,35 @@ def test_event_bus_and_blockers_update_mission_without_reasoning_calls(tmp_path)
         updated = await operator.process_event(event)
         assert updated.status is MissionStatus.WAITING
     asyncio.run(scenario())
+
+
+def test_explicitly_paused_mission_never_runs_or_observes_until_resumed(tmp_path):
+    calls = []
+    async def runner(mission):
+        calls.append(mission.mission_id)
+        return MissionStatus.COMPLETED
+    async def scenario():
+        operator, controller = build(tmp_path, runner)
+        mission = await operator.create(Mission("pause safely", "user"))
+        mission.status = MissionStatus.PAUSED
+        operator.store.save(mission)
+        paused = await operator.run_once(mission.mission_id)
+        assert paused.status is MissionStatus.PAUSED
+        assert calls == [] and controller.observations == 0
+        paused.status = MissionStatus.WAITING
+        operator.store.save(paused)
+        done = await operator.run_once(mission.mission_id)
+        assert done.status is MissionStatus.COMPLETED and len(calls) == 1
+    asyncio.run(scenario())
+
+
+def test_operator_dispatches_events_to_runtime_trigger_handlers(tmp_path):
+    handled = []
+    async def runner(_): return MissionStatus.COMPLETED
+    async def handler(event): handled.append(event.type)
+    async def scenario():
+        operator, _ = build(tmp_path, runner)
+        operator.event_handlers = (handler,)
+        await operator.process_event(AutonomousEvent(EventType.FILE_CREATED))
+        assert handled == [EventType.FILE_CREATED]
+    asyncio.run(scenario())

@@ -22,6 +22,7 @@ from app.autonomy.resources import ResourceLockManager
 from app.autonomy.contracts import Idempotency
 from app.autonomy.recovery import RecoveryEngine, RecoveryStrategy
 from app.safety.permissions import ApprovalRequired, PermissionDenied
+from app.safety.redaction import redact
 
 
 class DecisionProvider(Protocol):
@@ -229,13 +230,14 @@ class ActionRuntime:
     def _result(self, action: ComputerAction, success: bool, error: str | None, started: float,
                 code: ErrorCode | None = None, output: Any = None, verified: bool = False,
                 policy: str = "auto_approve", approval: str = "not_required") -> ActionResult:
-        result = ActionResult(action.action_id, success, output, f"{code.value}: {error}" if code else error, verified,
+        safe_output, safe_error = redact(output), redact(error)
+        result = ActionResult(action.action_id, success, safe_output, f"{code.value}: {safe_error}" if code else safe_error, verified,
                               (monotonic() - started) * 1000)
         self._completed_actions[action.action_id] = result
         self.governor.record(action.task_id, success)
         agent = self.manager.get_agent(action.agent_id)
         record = AuditRecord(action.timestamp, action.agent_id, agent.parent_agent_id, action.task_id, action.action_id,
-            action.action_type, action.permission, _redact_arguments(action.arguments), str(output) if output is not None else None,
+            action.action_type, action.permission, _redact_arguments(action.arguments), str(safe_output) if safe_output is not None else None,
             result.error, result.duration_ms, policy, approval)
         self.audit.append(record)
         if self._audit_store:
@@ -255,6 +257,4 @@ def _verify(expected: dict[str, Any], state: ComputerState, output: Any) -> bool
 
 def _redact_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     """Audit capability references, never secret material supplied by a tool caller."""
-    sensitive = {"password", "secret", "token", "api_key", "authorization", "cookie"}
-    return {key: "[REDACTED]" if any(part in key.casefold() for part in sensitive) else value
-            for key, value in arguments.items()}
+    return redact(arguments)

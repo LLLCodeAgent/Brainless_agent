@@ -12,6 +12,7 @@ from typing import Protocol
 from app.autonomy.events import AutonomousEvent, AutonomousEventBus, EventType
 from app.autonomy.mission import Mission, MissionStatus, MissionStore
 from app.autonomy.perception_service import PerceptionService
+from app.safety.redaction import redact
 
 class AutonomyMode(str, Enum):
     OBSERVE_ONLY="observe_only"; ASSISTED="assisted"; AUTONOMOUS="autonomous"; SUPERVISED="supervised"; WATCH="watch"; TAKEOVER="takeover"; PAUSED="paused"
@@ -38,9 +39,11 @@ class AutonomousOperator:
     """Runs one bounded mission turn at a time, sleeping on its event queue when idle."""
     def __init__(self, store: MissionStore, perception: PerceptionService, events: AutonomousEventBus,
                  runner: MissionRunner, *, takeover: UserTakeoverManager | None = None,
-                 blockers: BlockerDetector | None = None) -> None:
+                 blockers: BlockerDetector | None = None,
+                 event_handlers: tuple[Callable[[AutonomousEvent], Awaitable[object]], ...] = ()) -> None:
         self.store, self.perception, self.events, self.runner = store, perception, events, runner
         self.takeover, self.blockers = takeover or UserTakeoverManager(), blockers or BlockerDetector()
+        self.event_handlers = event_handlers
 
     async def create(self, mission: Mission) -> Mission:
         mission.status = MissionStatus.PLANNING; mission.touch(); self.store.save(mission)
@@ -51,6 +54,9 @@ class AutonomousOperator:
         mission = self.store.load(mission_id)
         if mission is None: raise KeyError(f"Unknown mission: {mission_id}")
         if mission.status in {MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED}: return mission
+        # PAUSED is an explicit operator decision. Merely receiving an unrelated
+        # event must never make the mission runnable again.
+        if mission.status is MissionStatus.PAUSED: return mission
         snapshot = await self.perception.observe(mission_id)
         mission.current_state = snapshot.values(); mission.checkpoint["world_version"] = snapshot.version
         if self.takeover.mode is AutonomyMode.TAKEOVER:
@@ -62,12 +68,15 @@ class AutonomousOperator:
             mission.status = await self.runner(mission)
         except Exception as error:
             mission.status = MissionStatus.RECOVERING
-            mission.checkpoint["last_error"] = str(error)
-            await self.events.publish(AutonomousEvent(EventType.AGENT_FAILED, mission_id, {"error": str(error)}))
+            safe_error = redact(str(error))
+            mission.checkpoint["last_error"] = safe_error
+            await self.events.publish(AutonomousEvent(EventType.AGENT_FAILED, mission_id, {"error": safe_error}))
         mission.refresh_progress(); mission.touch(); self.store.save(mission)
         return mission
 
     async def process_event(self, event: AutonomousEvent) -> Mission | None:
+        for handler in self.event_handlers:
+            await handler(event)
         if event.type is EventType.USER_TAKEOVER: self.takeover.begin()
         if event.mission_id is None: return None
         mission = self.store.load(event.mission_id)

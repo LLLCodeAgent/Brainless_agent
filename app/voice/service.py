@@ -97,6 +97,14 @@ class VoiceRuntimeRouter:
             return {"status": "completed", "mission_id": None, "result": "User takeover enabled"}
         if intent.type is VoiceIntentType.RESUME:
             self.operator.takeover.resume()
+            for mission in self.missions.active():
+                if mission.status in {MissionStatus.PAUSED, MissionStatus.AWAITING_USER}:
+                    mission.status = MissionStatus.WAITING
+                    mission.touch()
+                    self.missions.save(mission)
+                    await self.operator.events.publish(AutonomousEvent(
+                        EventType.MISSION_TRIGGERED, mission.mission_id,
+                        {"source": "authorized_voice_resume"}))
             return {"status": "completed", "mission_id": None, "result": "Control returned to runtime"}
         if intent.type is VoiceIntentType.QUERY_STATUS:
             return {"status": "completed", "mission_id": None,
